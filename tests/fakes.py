@@ -14,6 +14,7 @@ class FakeResearchLLM:
         self.review_score = review_score
         self.review_comment = "测试审核意见。"
         self.research_scores = research_scores or [85]
+        self.plan_calls = 0
         self.research_calls = 0
         self.research_evaluation_calls = 0
         self.last_research_feedback = ""
@@ -21,6 +22,7 @@ class FakeResearchLLM:
         self.last_sources: list[str] = []
 
     def create_plan(self, topic: str) -> list[str]:
+        self.plan_calls += 1
         return [
             f"分析 {topic} 的背景",
             "梳理当前应用",

@@ -1,7 +1,8 @@
-# Mini Research Agent：第七阶段
+# Mini Research Agent：第八阶段
 
-当前阶段增加了 Human-in-the-loop。Planner 生成研究计划后，Graph 会暂停，
-等待用户确认或修改计划，然后才允许 Researcher 执行收费的网页搜索。
+当前阶段把 Checkpoint 从进程内存迁移到了 SQLite。Planner 生成研究计划后，
+程序会保存完整状态并退出；即使关闭终端，也可以使用同一个 `thread_id`
+恢复任务，然后才允许 Researcher 执行收费的网页搜索。
 
 - Planner：使用结构化输出生成 3 到 6 个研究任务。
 - Plan Approval：暂停 Graph，让用户确认或替换研究计划。
@@ -24,7 +25,7 @@ START → planner → plan_approval → researcher → research_evaluator
                                                                   └─ 重写 >= 3 → END
 ```
 
-## 暂停和恢复
+## 持久化暂停和恢复
 
 `plan_approval_node()` 通过 `interrupt()` 把研究计划交给调用方：
 
@@ -38,7 +39,10 @@ decision = interrupt(
 ```
 
 第一次 `invoke()` 不会执行 Researcher，而是在 `__interrupt__` 中返回
-等待处理的内容。用户做出决定后，程序使用相同的 `thread_id` 恢复：
+等待处理的内容。此时 SQLite 已经保存 Planner 的输出、待执行节点和中断信息，
+所以第一个 Python 进程可以安全结束。
+
+另一个 Python 进程打开相同的数据库后，使用相同的 `thread_id` 恢复：
 
 ```python
 result = graph.invoke(
@@ -62,11 +66,19 @@ Research Evaluator 使用结构化输出返回 `research_score` 和
 补充搜索不会覆盖前一轮结果。Researcher 会累积研究内容，并对来源 URL
 去重。最终文件会记录研究评分、评估意见和实际研究轮数。
 
-Graph 在编译时使用 `InMemorySaver`：
+单元测试中的默认 Graph 仍使用 `InMemorySaver`，让测试彼此隔离：
 
 ```python
-checkpointer = InMemorySaver()
-graph = builder.compile(checkpointer=checkpointer)
+graph = build_graph(checkpointer=InMemorySaver())
+```
+
+CLI 使用 `app/checkpoints.py` 创建 Checkpointer。默认后端是 `SqliteSaver`，
+数据库位于 `checkpoints/research.sqlite`：
+
+```python
+with SqliteSaver.from_conn_string(database_path) as checkpointer:
+    checkpointer.setup()
+    graph = build_graph(checkpointer=checkpointer)
 ```
 
 每次调用 Graph 时都需要传入线程配置：
@@ -87,9 +99,24 @@ history = list(graph.get_state_history(config))
 `snapshot.values` 是当前快照中的 State，`snapshot.next` 是接下来要执行的节点。
 工作流正常结束后，`snapshot.next` 是空元组。
 
-`InMemorySaver` 只适合学习和测试。数据只存在当前 Python 进程内；命令结束后，
-下一次启动无法恢复上次的快照。后续工业化时应替换为 SQLite 或 PostgreSQL
-Checkpointer。
+SQLite 适合当前的单机同步 CLI。将来部署多个 Worker 时，应继续替换为
+PostgreSQL Checkpointer，而不是让多个进程长期共享一个 SQLite 连接。
+
+## Checkpoint 配置
+
+`.env` 支持两项独立于 LLM Provider 的配置：
+
+```dotenv
+CHECKPOINT_BACKEND=sqlite
+CHECKPOINT_DB_PATH=checkpoints/research.sqlite
+```
+
+`CHECKPOINT_BACKEND` 可设为：
+
+- `sqlite`：默认值，程序退出后仍保留状态。
+- `memory`：只在当前进程保存状态，适合临时实验。
+
+数据库属于运行数据，`checkpoints/` 已加入 `.gitignore`，不会提交到 Git。
 
 Researcher 会把两类数据写入 State：
 
@@ -157,29 +184,64 @@ OpenAI API Key。两个 Provider 都使用同一份研究 Prompt，来源会从
 `.env` 已被 Git 忽略，不要把任何真实 API Key 写入 `.env.example`
 或提交到代码仓库。
 
-使用默认主题运行：
+创建一个新任务：
 
 ```bash
-python -m app.main
+python -m app.main run
 ```
 
 也可以在命令后传入自己的主题：
 
 ```bash
-python -m app.main "研究 AI Agent 在教育领域的应用趋势"
+python -m app.main run "研究 AI Agent 在教育领域的应用趋势"
 ```
 
 指定一个 Checkpoint 线程：
 
 ```bash
-python -m app.main "研究 AI Agent 在教育领域的应用趋势" --thread-id user-001
+python -m app.main run "研究 AI Agent 在教育领域的应用趋势" --thread-id user-001
 ```
 
-如果不传 `--thread-id`，程序会生成一个 UUID，并把它记录到控制台。
-当 Planner 输出计划后：
+如果不传 `--thread-id`，程序会生成一个 UUID，并把它记录到控制台。Planner
+输出计划后，程序会在审批点停止。此时可以关闭程序，再执行：
 
-- 直接按 Enter：批准原计划。
-- 输入新任务：替换原计划，多个任务使用中文或英文分号分隔。
+```bash
+python -m app.main resume --thread-id user-001 --approve
+```
+
+如果需要替换研究计划：
+
+```bash
+python -m app.main resume --thread-id user-001 \
+  --plan "研究官方文档；查找生产案例；总结风险"
+```
+
+审批恢复会从 `plan_approval` 继续，不会再次执行 Planner。任务完成后，最终报告
+仍然写入 `outputs/`。
+
+如果某个普通节点因为网络或 API 错误而失败，修复问题后不需要审批参数：
+
+```bash
+python -m app.main resume --thread-id user-001
+```
+
+Graph 会从快照记录的待执行节点继续。已经成功完成并写入 Checkpoint 的上游节点
+不会重复执行。
+
+只读查看任务状态，不会调用 LLM：
+
+```bash
+python -m app.main status --thread-id user-001
+```
+
+按执行顺序查看全部 Checkpoint：
+
+```bash
+python -m app.main history --thread-id user-001
+```
+
+每个新任务应该使用新的 `thread_id`。如果 `run` 发现 ID 已存在，会拒绝覆盖，
+避免旧状态和新状态意外合并。
 
 控制台会显示各节点的执行状态和每次 LLM 调用的输出：Planner 的计划、
 Researcher 的研究摘要与来源、Writer 的完整草稿，以及 Reviewer 的评分与意见。
@@ -204,13 +266,13 @@ python -m unittest discover -v
 
 ## 建议阅读顺序
 
-1. `app/nodes.py`：阅读 `plan_approval_node()` 中的 `interrupt()`。
-2. `app/graph.py`：看确认节点为什么位于 Planner 和 Researcher 之间。
-3. `app/human.py`：看控制台输入如何转换成可序列化的决定。
-4. `app/main.py`：跟踪首次 `invoke()`、`__interrupt__` 和 `Command(resume=...)`。
-5. `app/config.py` 和 `app/llm.py`：看 Provider 工厂和两种 Responses Web Search 实现。
-6. `tests/test_graph.py`：看两个质量循环的分支和上限如何测试。
-7. `app/runtime.py`：回顾 Checkpoint 为什么需要 `thread_id`。
+1. `app/checkpoints.py`：看配置如何选择 Memory 或 SQLite，并管理数据库连接。
+2. `app/main.py`：跟踪 `run`、`resume`、`status` 和 `history` 四条路径。
+3. `app/nodes.py`：回顾 `plan_approval_node()` 中的 `interrupt()`。
+4. `app/graph.py`：看同一个 Graph 如何接收不同的 Checkpointer。
+5. `tests/test_checkpoints.py`：看关闭并重新打开数据库后如何恢复任务。
+6. `app/runtime.py`：回顾 Checkpoint 为什么需要 `thread_id`。
+7. `app/config.py` 和 `app/llm.py`：看 LLM 配置为何与 Checkpoint 配置分离。
 
 注意：节点返回的是局部更新，而不是完整 State。LangGraph 会把这些更新
 合并到当前 State 中，并把合并后的 State 交给下一个节点。
