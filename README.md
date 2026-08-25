@@ -96,9 +96,11 @@ Researcher 会把两类数据写入 State：
 - `research_content`：模型根据搜索结果整理的中文研究资料。
 - `sources`：从 Web Search 工具调用中提取并去重的来源 URL。
 
-搜索被设置为 `required`，避免模型跳过工具直接凭记忆回答；每轮 Researcher
-最多允许 6 次网页搜索工具调用。最多执行 3 轮 Researcher，因此一个任务
-最坏情况可能发生 18 次 Web Search 工具调用。
+搜索被设置为 `required`，避免模型跳过工具直接凭记忆回答。OpenAI
+模式下，每轮 Researcher 最多允许 6 次 Web Search 工具调用；Graph
+最多研究 3 轮，因此理论上限是 18 次。DeepSeek 模式下，官方文档明确
+说明 `max_tool_calls` 会被忽略，每次 Responses API 请求的服务端自动续行
+最多 10 轮；项目仍通过 Graph 的 3 轮研究上限控制总流程。
 
 Reviewer 返回评分后，`review_router()` 只负责做出选择：
 
@@ -128,17 +130,32 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-然后编辑 `.env`，填入自己的 API Key：
+然后编辑 `.env`。使用 OpenAI 作为主模型：
 
 ```dotenv
-OPENAI_API_KEY=your_api_key_here
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-5-nano
 OPENAI_SEARCH_MODEL=gpt-5.4-mini
 ```
 
-`.env` 已被 Git 忽略，不要把真实 API Key 提交到代码仓库。普通生成节点使用
-`OPENAI_MODEL`；Researcher 单独使用 `OPENAI_SEARCH_MODEL`。默认搜索模型选择
-`gpt-5.4-mini`，因为它明确支持 Responses API Web Search 和结构化输出。
+使用 DeepSeek 作为主模型：
+
+```dotenv
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+```
+
+`LLM_PROVIDER` 支持 `openai` 和 `deepseek`。切换为 DeepSeek 后，Planner、
+Researcher、Research Evaluator、Writer 和 Reviewer 全部使用 DeepSeek。
+Researcher 通过 DeepSeek 的 Responses API 调用服务端 `web_search`，不再需要
+OpenAI API Key。两个 Provider 都使用同一份研究 Prompt，来源会从
+搜索元数据、引用标注或正文 URL 中提取并去重。
+
+`.env` 已被 Git 忽略，不要把任何真实 API Key 写入 `.env.example`
+或提交到代码仓库。
 
 使用默认主题运行：
 
@@ -191,7 +208,7 @@ python -m unittest discover -v
 2. `app/graph.py`：看确认节点为什么位于 Planner 和 Researcher 之间。
 3. `app/human.py`：看控制台输入如何转换成可序列化的决定。
 4. `app/main.py`：跟踪首次 `invoke()`、`__interrupt__` 和 `Command(resume=...)`。
-5. `app/llm.py`：看补充搜索如何接收已有资料和评估意见。
+5. `app/config.py` 和 `app/llm.py`：看 Provider 工厂和两种 Responses Web Search 实现。
 6. `tests/test_graph.py`：看两个质量循环的分支和上限如何测试。
 7. `app/runtime.py`：回顾 Checkpoint 为什么需要 `thread_id`。
 
