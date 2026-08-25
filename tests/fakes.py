@@ -72,10 +72,15 @@ class FakeResearchLLM:
         research_content: str,
         sources: list[str],
         review_comment: str | None = None,
+        on_token=None,
     ) -> str:
         self.last_review_comment = review_comment
         self.last_sources = sources
-        return f"# {topic}\n\n{research_content}\n\n## 初步结论\n\n测试结论。"
+        draft = f"# {topic}\n\n{research_content}\n\n## 初步结论\n\n测试结论。"
+        if on_token is not None:
+            for token in [f"# {topic}\n\n", research_content, "\n\n## 初步结论\n\n测试结论。"]:
+                on_token(token)
+        return draft
 
     def review_report(self, _draft: str) -> ReportReview:
         return ReportReview(

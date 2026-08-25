@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 import re
-from typing import TypeVar
+from typing import Callable, TypeVar
 
 from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
@@ -12,6 +12,7 @@ from app.config import Settings
 
 MAX_WEB_SEARCH_CALLS = 6
 StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
+TokenCallback = Callable[[str], None]
 
 
 class ResearchPlan(BaseModel):
@@ -106,6 +107,42 @@ def extract_source_urls(response) -> list[str]:
         add_url(url.rstrip(".,;:，。；："))
 
     return source_urls
+
+
+def collect_responses_text(stream, on_token: TokenCallback) -> str:
+    """Collect Responses API text deltas while forwarding each token."""
+
+    text_parts = []
+    for event in stream:
+        if getattr(event, "type", None) != "response.output_text.delta":
+            continue
+
+        token = getattr(event, "delta", "")
+        if not token:
+            continue
+
+        text_parts.append(token)
+        on_token(token)
+
+    return "".join(text_parts).strip()
+
+
+def collect_chat_completion_text(stream, on_token: TokenCallback) -> str:
+    """Collect Chat Completions deltas while forwarding each token."""
+
+    text_parts = []
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+
+        token = getattr(chunk.choices[0].delta, "content", None)
+        if not token:
+            continue
+
+        text_parts.append(token)
+        on_token(token)
+
+    return "".join(text_parts).strip()
 
 
 class OpenAIResearchService:
@@ -229,6 +266,7 @@ class OpenAIResearchService:
         research_content: str,
         sources: list[str],
         review_comment: str | None = None,
+        on_token: TokenCallback | None = None,
     ) -> str:
         """Ask the model to write or revise a Markdown research report."""
 
@@ -239,9 +277,9 @@ class OpenAIResearchService:
 
         source_list = "\n".join(f"- {url}" for url in sources)
 
-        response = client.responses.create(
-            model=model,
-            input=[
+        request = {
+            "model": model,
+            "input": [
                 {
                     "role": "system",
                     "content": (
@@ -260,9 +298,17 @@ class OpenAIResearchService:
                     ),
                 },
             ],
-        )
+        }
 
-        draft = (response.output_text or "").strip()
+        if on_token is not None:
+            request["stream"] = True
+
+        response = client.responses.create(**request)
+        if on_token is not None:
+            draft = collect_responses_text(response, on_token)
+        else:
+            draft = (response.output_text or "").strip()
+
         if not draft:
             raise RuntimeError("Writer 没有返回报告内容。")
 
@@ -419,6 +465,7 @@ class DeepSeekResearchService:
         research_content: str,
         sources: list[str],
         review_comment: str | None = None,
+        on_token: TokenCallback | None = None,
     ) -> str:
         """Ask DeepSeek to write or revise the report."""
 
@@ -446,6 +493,7 @@ class DeepSeekResearchService:
                 },
             ],
             operation_name="DeepSeek Writer",
+            on_token=on_token,
         )
 
     def review_report(self, draft: str) -> ReportReview:
@@ -492,16 +540,24 @@ class DeepSeekResearchService:
         messages: list[dict[str, str]],
         operation_name: str,
         response_format: dict[str, str] | None = None,
+        on_token: TokenCallback | None = None,
     ) -> str:
         """Call DeepSeek through its OpenAI-compatible Chat API."""
 
         client, model = self._get_client_and_model()
-        request = {"model": model, "messages": messages, "stream": False}
+        request = {
+            "model": model,
+            "messages": messages,
+            "stream": on_token is not None,
+        }
         if response_format is not None:
             request["response_format"] = response_format
 
         response = client.chat.completions.create(**request)
-        content = (response.choices[0].message.content or "").strip()
+        if on_token is not None:
+            content = collect_chat_completion_text(response, on_token)
+        else:
+            content = (response.choices[0].message.content or "").strip()
         if not content:
             raise RuntimeError(f"{operation_name} 没有返回内容。")
 
@@ -523,6 +579,7 @@ class DeepSeekResearchService:
             self._model = settings.deepseek_model
 
         return self._client, self._model
+
 
 def create_research_service(settings: Settings):
     """Create one provider for every LLM operation, including research."""

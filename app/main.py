@@ -16,6 +16,7 @@ from app.config import ConfigurationError
 from app.graph import build_graph
 from app.output import save_result
 from app.runtime import create_initial_state, create_run_config, create_thread_id
+from app.streaming import run_graph_stream
 
 
 DEFAULT_TOPIC = "AI Agent 在教育领域的发展趋势"
@@ -97,7 +98,11 @@ def run_new_research(graph, topic: str, supplied_thread_id: str | None) -> None:
 
     clean_topic = topic.strip() or DEFAULT_TOPIC
     print(f"线程 ID：{thread_id}")
-    result = graph.invoke(create_initial_state(clean_topic), config=config)
+    result = run_graph_stream(
+        graph,
+        create_initial_state(clean_topic),
+        config,
+    )
     finish_or_report_interrupt(result, thread_id)
 
 
@@ -129,7 +134,7 @@ def resume_research(
             )
         graph_input = None
 
-    result = graph.invoke(graph_input, config=config)
+    result = run_graph_stream(graph, graph_input, config)
     finish_or_report_interrupt(result, thread_id)
 
 

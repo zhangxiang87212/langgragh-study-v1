@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from langgraph.config import get_stream_writer
 from langgraph.types import interrupt
 
 from app.llm import llm
@@ -152,18 +153,48 @@ def writer_node(state: ResearchState) -> dict[str, str | int]:
 
     topic = state["topic"]
     research_content = state["research_content"]
-    draft = llm.write_report(
-        topic=topic,
-        research_content=research_content,
-        sources=state["sources"],
-        review_comment=review_comment,
-    )
-    print(f"Writer 输出：\n{draft}")
+    stream_writer = _get_stream_writer_or_none()
+    token_callback = None
+    if stream_writer is not None:
+        stream_writer({"event": "llm_stream_start", "node": "Writer"})
+
+        def send_token(token: str) -> None:
+            stream_writer({
+                "event": "llm_token",
+                "node": "Writer",
+                "text": token,
+            })
+
+        token_callback = send_token
+
+    try:
+        draft = llm.write_report(
+            topic=topic,
+            research_content=research_content,
+            sources=state["sources"],
+            review_comment=review_comment,
+            on_token=token_callback,
+        )
+    finally:
+        if stream_writer is not None:
+            stream_writer({"event": "llm_stream_end", "node": "Writer"})
+
+    if stream_writer is None:
+        print(f"Writer 输出：\n{draft}")
 
     return {
         "draft": draft,
         "revision_count": revision_count,
     }
+
+
+def _get_stream_writer_or_none():
+    """Return LangGraph's custom writer only during a streamed run."""
+
+    try:
+        return get_stream_writer()
+    except RuntimeError:
+        return None
 
 
 def reviewer_node(state: ResearchState) -> dict[str, int | str]:

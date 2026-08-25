@@ -20,6 +20,26 @@ class FakeDeepSeekCompletions:
         self.last_request = request
         system_prompt = request["messages"][0]["content"]
 
+        if request["stream"]:
+            return iter(
+                [
+                    SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="# 流式报告\n\n")
+                            )
+                        ]
+                    ),
+                    SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="正文。")
+                            )
+                        ]
+                    ),
+                ]
+            )
+
         if "研究规划专家" in system_prompt:
             content = '{"tasks":["任务一","任务二","任务三"]}'
         elif "研究资料评估专家" in system_prompt:
@@ -93,6 +113,20 @@ class DeepSeekResearchServiceTests(unittest.TestCase):
         self.assertEqual(draft, "# DeepSeek 测试报告\n\n正文。")
         self.assertNotIn("response_format", request)
         self.assertIn("请补充结论。", request["messages"][1]["content"])
+
+    def test_write_report_streams_and_collects_text(self) -> None:
+        tokens = []
+
+        draft = self.service.write_report(
+            topic="测试主题",
+            research_content="测试资料",
+            sources=["https://example.com/research"],
+            on_token=tokens.append,
+        )
+
+        self.assertTrue(self.completions.last_request["stream"])
+        self.assertEqual(tokens, ["# 流式报告\n\n", "正文。"])
+        self.assertEqual(draft, "# 流式报告\n\n正文。")
 
     def test_review_report_parses_json(self) -> None:
         review = self.service.review_report("测试报告")

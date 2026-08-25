@@ -1,8 +1,9 @@
-# Mini Research Agent：第八阶段
+# Mini Research Agent：第九阶段
 
-当前阶段把 Checkpoint 从进程内存迁移到了 SQLite。Planner 生成研究计划后，
-程序会保存完整状态并退出；即使关闭终端，也可以使用同一个 `thread_id`
-恢复任务，然后才允许 Researcher 执行收费的网页搜索。
+当前阶段增加了流式执行。CLI 不再使用 `graph.invoke()` 等待整张图结束，
+而是持续消费 `graph.stream()` 产生的节点更新和自定义事件。Writer 生成报告时，
+OpenAI 和 DeepSeek 的文本都会按 token 实时显示；最终完整 State 仍由 SQLite
+保存，报告仍只写入 Markdown 文件。
 
 - Planner：使用结构化输出生成 3 到 6 个研究任务。
 - Plan Approval：暂停 Graph，让用户确认或替换研究计划。
@@ -25,6 +26,43 @@ START → planner → plan_approval → researcher → research_evaluator
                                                                   └─ 重写 >= 3 → END
 ```
 
+## LangGraph 流式执行
+
+CLI 使用两种 stream mode：
+
+```python
+for part in graph.stream(
+    graph_input,
+    config=config,
+    stream_mode=["updates", "custom"],
+    version="v2",
+):
+    ...
+```
+
+- `updates`：节点完成后返回这个节点对 State 的局部更新。CLI 只打印节点名称，
+  不把整个 State 和最终报告重复输出到控制台。
+- `custom`：节点主动发出的自定义事件。当前用于传递 Writer 的开始、token 和结束
+  三类事件。
+
+项目直接使用 OpenAI Python SDK，而不是 LangChain ChatModel，所以不能依赖
+`messages` 模式自动捕获 token。`writer_node()` 通过 `get_stream_writer()` 获取
+LangGraph 的事件写入器，再把回调交给 LLM Provider：
+
+```python
+def send_token(token: str) -> None:
+    stream_writer(
+        {"event": "llm_token", "node": "Writer", "text": token}
+    )
+```
+
+OpenAI Writer 遍历 Responses API 的 `response.output_text.delta`；DeepSeek Writer
+遍历 Chat Completions 的 `choices[0].delta.content`。每个 token 一方面立即写入
+LangGraph 自定义流，另一方面累积成完整 `draft`，因此流式显示不会改变 State。
+
+结构化输出仍在完整响应到达后统一校验。Planner、Research Evaluator 和 Reviewer
+的结果较短，继续以完整日志显示；Researcher 在搜索完成后显示资料和来源。
+
 ## 持久化暂停和恢复
 
 `plan_approval_node()` 通过 `interrupt()` 把研究计划交给调用方：
@@ -38,16 +76,18 @@ decision = interrupt(
 )
 ```
 
-第一次 `invoke()` 不会执行 Researcher，而是在 `__interrupt__` 中返回
-等待处理的内容。此时 SQLite 已经保存 Planner 的输出、待执行节点和中断信息，
-所以第一个 Python 进程可以安全结束。
+第一次 `graph.stream()` 不会执行 Researcher，而是产生一个名为
+`__interrupt__` 的 update。此时 SQLite 已经保存 Planner 的输出、待执行节点和
+中断信息，所以第一个 Python 进程可以安全结束。
 
 另一个 Python 进程打开相同的数据库后，使用相同的 `thread_id` 恢复：
 
 ```python
-result = graph.invoke(
+events = graph.stream(
     Command(resume={"action": "approve"}),
     config=config,
+    stream_mode=["updates", "custom"],
+    version="v2",
 )
 ```
 
@@ -81,11 +121,11 @@ with SqliteSaver.from_conn_string(database_path) as checkpointer:
     graph = build_graph(checkpointer=checkpointer)
 ```
 
-每次调用 Graph 时都需要传入线程配置：
+每次执行 Graph 时都需要传入线程配置：
 
 ```python
 config = {"configurable": {"thread_id": "user-001"}}
-result = graph.invoke(initial_state, config=config)
+events = graph.stream(initial_state, config=config, stream_mode="updates")
 ```
 
 `thread_id` 不是 State 字段。它是 Checkpointer 用来区分不同执行线程的键。
@@ -244,7 +284,8 @@ python -m app.main history --thread-id user-001
 避免旧状态和新状态意外合并。
 
 控制台会显示各节点的执行状态和每次 LLM 调用的输出：Planner 的计划、
-Researcher 的研究摘要与来源、Writer 的完整草稿，以及 Reviewer 的评分与意见。
+Researcher 的研究摘要与来源、Writer 的 token 流，以及 Reviewer 的评分与意见。
+每个节点成功写入 State 后还会输出一条 `节点完成` 日志。
 执行完成后，最终汇总结果还会写入：
 
 ```text
@@ -266,13 +307,13 @@ python -m unittest discover -v
 
 ## 建议阅读顺序
 
-1. `app/checkpoints.py`：看配置如何选择 Memory 或 SQLite，并管理数据库连接。
-2. `app/main.py`：跟踪 `run`、`resume`、`status` 和 `history` 四条路径。
-3. `app/nodes.py`：回顾 `plan_approval_node()` 中的 `interrupt()`。
-4. `app/graph.py`：看同一个 Graph 如何接收不同的 Checkpointer。
-5. `tests/test_checkpoints.py`：看关闭并重新打开数据库后如何恢复任务。
-6. `app/runtime.py`：回顾 Checkpoint 为什么需要 `thread_id`。
-7. `app/config.py` 和 `app/llm.py`：看 LLM 配置为何与 Checkpoint 配置分离。
+1. `app/streaming.py`：看 `updates` 和 `custom` 两类事件如何消费。
+2. `app/nodes.py`：看 Writer 如何把 token 写入 LangGraph 自定义流。
+3. `app/llm.py`：比较 OpenAI Responses 和 DeepSeek Chat 的流式事件格式。
+4. `app/main.py`：看 `run` 和 `resume` 如何共用 `run_graph_stream()`。
+5. `tests/test_streaming.py`：看真实 Graph 的暂停、恢复和 token 流测试。
+6. `app/checkpoints.py`：回顾流式执行和 SQLite Checkpoint 如何组合。
+7. `tests/test_checkpoints.py`：看关闭并重新打开数据库后如何恢复任务。
 
 注意：节点返回的是局部更新，而不是完整 State。LangGraph 会把这些更新
 合并到当前 State 中，并把合并后的 State 交给下一个节点。

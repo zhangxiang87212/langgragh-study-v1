@@ -32,6 +32,21 @@ class FakeResponses:
     def create(self, **request):
         self.last_request = request
 
+        if request.get("stream"):
+            return iter(
+                [
+                    SimpleNamespace(
+                        type="response.output_text.delta",
+                        delta="# 流式报告\n\n",
+                    ),
+                    SimpleNamespace(
+                        type="response.output_text.delta",
+                        delta="测试内容。",
+                    ),
+                    SimpleNamespace(type="response.completed"),
+                ]
+            )
+
         if request.get("tools") == [{"type": "web_search"}]:
             source_one = SimpleNamespace(url="https://example.com/one")
             source_two = SimpleNamespace(url="https://example.com/two")
@@ -128,6 +143,20 @@ class OpenAIResearchServiceTests(unittest.TestCase):
         self.assertEqual(draft, "# 测试报告\n\n测试内容。")
         self.assertIn("请补充结论。", user_prompt)
         self.assertIn("https://example.com/research", user_prompt)
+
+    def test_write_report_streams_and_collects_text(self) -> None:
+        tokens = []
+
+        draft = self.service.write_report(
+            topic="测试主题",
+            research_content="测试资料",
+            sources=["https://example.com/research"],
+            on_token=tokens.append,
+        )
+
+        self.assertTrue(self.responses.last_request["stream"])
+        self.assertEqual(tokens, ["# 流式报告\n\n", "测试内容。"])
+        self.assertEqual(draft, "# 流式报告\n\n测试内容。")
 
     def test_review_report_uses_structured_output(self) -> None:
         review = self.service.review_report("测试报告")
