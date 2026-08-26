@@ -6,7 +6,7 @@ from langgraph.config import get_stream_writer
 from langgraph.types import interrupt
 
 from app.llm import llm
-from app.state import ResearchState
+from app.state import ResearchState, ResearchTaskResult, ResearchWorkerState
 
 
 def planner_node(state: ResearchState) -> dict[str, list[str]]:
@@ -64,44 +64,137 @@ def _is_valid_plan(plan: object) -> bool:
     )
 
 
-def researcher_node(state: ResearchState) -> dict[str, str | list[str] | int]:
-    """Use web search to collect research notes and source URLs."""
+def prepare_research_round_node(state: ResearchState) -> dict[str, int]:
+    """Advance the round once before its research workers fan out."""
 
-    completed_iterations = state.get("research_iteration", 0)
-    research_iteration = completed_iterations + 1
-    print(f"正在进行第 {research_iteration} 轮研究...")
+    research_iteration = state.get("research_iteration", 0) + 1
+    task_count = len(state["plan"])
+    print(
+        f"准备第 {research_iteration} 轮并行研究，"
+        f"共 {task_count} 个任务。"
+    )
+    return {"research_iteration": research_iteration}
 
-    existing_research = ""
-    existing_sources = []
-    evaluation_comment = ""
-    if completed_iterations > 0:
-        existing_research = state.get("research_content", "")
-        existing_sources = state.get("sources", [])
-        evaluation_comment = state.get("research_comment", "")
+
+def research_worker_node(
+    state: ResearchWorkerState,
+) -> dict[str, list[ResearchTaskResult]]:
+    """Research one plan task in an isolated parallel worker."""
+
+    task_number = state["task_index"] + 1
+    stream_writer = _get_stream_writer_or_none()
+    if stream_writer is not None:
+        stream_writer({
+            "event": "research_task_start",
+            "task_number": task_number,
+            "task_count": state["task_count"],
+            "task": state["task"],
+        })
+    else:
+        print(
+            f"Researcher {task_number}/{state['task_count']} 开始："
+            f"{state['task']}"
+        )
 
     research = llm.research(
         topic=state["topic"],
-        tasks=state["plan"],
-        existing_research=existing_research,
-        evaluation_comment=evaluation_comment,
+        tasks=[state["task"]],
+        existing_research=state["existing_research"],
+        evaluation_comment=state["evaluation_comment"],
     )
-    print(f"Researcher 输出：\n{research.content}")
-    print("Researcher 来源：")
-    for source in research.sources:
-        print(f"- {source}")
+
+    if stream_writer is not None:
+        stream_writer({
+            "event": "research_task_result",
+            "task_number": task_number,
+            "task_count": state["task_count"],
+            "task": state["task"],
+            "content": research.content,
+            "sources": research.sources,
+        })
+    else:
+        _print_research_result(
+            task_number,
+            state["task_count"],
+            state["task"],
+            research.content,
+            research.sources,
+        )
+
+    result: ResearchTaskResult = {
+        "run_id": state["run_id"],
+        "research_iteration": state["research_iteration"],
+        "task_index": state["task_index"],
+        "task": state["task"],
+        "content": research.content,
+        "sources": research.sources,
+    }
+    return {"research_results": [result]}
+
+
+def research_reducer_node(
+    state: ResearchState,
+) -> dict[str, str | list[str]]:
+    """Merge the current round's parallel results in plan order."""
+
+    current_results = [
+        result
+        for result in state["research_results"]
+        if result["run_id"] == state["run_id"]
+        and result["research_iteration"] == state["research_iteration"]
+    ]
+    current_results.sort(key=lambda result: result["task_index"])
+
+    if len(current_results) != len(state["plan"]):
+        raise RuntimeError("并行研究结果数量与研究计划不一致。")
+
+    round_content = "\n\n".join(
+        f"### 任务 {result['task_index'] + 1}：{result['task']}\n\n"
+        f"{result['content']}"
+        for result in current_results
+    )
+    existing_research = ""
+    existing_sources = []
+    if state["research_iteration"] > 1:
+        existing_research = state.get("research_content", "")
+        existing_sources = state.get("sources", [])
 
     research_content = _combine_research_content(
         existing_research,
-        research.content,
-        research_iteration,
+        round_content,
+        state["research_iteration"],
     )
-    sources = list(dict.fromkeys([*existing_sources, *research.sources]))
 
+    new_sources = [
+        source
+        for result in current_results
+        for source in result["sources"]
+    ]
+    sources = list(dict.fromkeys([*existing_sources, *new_sources]))
+
+    print(
+        f"第 {state['research_iteration']} 轮研究汇总完成："
+        f"{len(current_results)} 个任务，{len(sources)} 个去重来源。"
+    )
     return {
         "research_content": research_content,
         "sources": sources,
-        "research_iteration": research_iteration,
     }
+
+
+def _print_research_result(
+    task_number: int,
+    task_count: int,
+    task: str,
+    content: str,
+    sources: list[str],
+) -> None:
+    """Print one complete worker result without interleaving token output."""
+
+    print(f"Researcher {task_number}/{task_count} 输出：{task}\n{content}")
+    print(f"Researcher {task_number}/{task_count} 来源：")
+    for source in sources:
+        print(f"- {source}")
 
 
 def _combine_research_content(
@@ -112,7 +205,7 @@ def _combine_research_content(
     """Keep earlier evidence and append notes from a follow-up search."""
 
     if not existing_research:
-        return new_research
+        return f"## 第 1 轮并行研究\n\n{new_research}"
 
     return (
         f"{existing_research}\n\n"

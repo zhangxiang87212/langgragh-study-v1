@@ -12,12 +12,13 @@ from app.graph import (
     MAX_REVISIONS,
     RESEARCH_PASS_SCORE,
     build_graph,
+    dispatch_research_workers,
     graph,
     research_router,
     review_router,
 )
 from app.runtime import create_initial_state, create_run_config
-from tests.fakes import FakeResearchLLM
+from tests.fakes import FakeResearchLLM, ParallelTrackingResearchLLM
 
 
 class GraphTests(unittest.TestCase):
@@ -127,6 +128,7 @@ class GraphTests(unittest.TestCase):
 
         expected_keys = {
             "topic",
+            "run_id",
             "plan",
             "plan_approved",
             "research_content",
@@ -134,6 +136,7 @@ class GraphTests(unittest.TestCase):
             "research_score",
             "research_comment",
             "research_iteration",
+            "research_results",
             "draft",
             "review_score",
             "review_comment",
@@ -144,6 +147,7 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(result["review_score"], 85)
         self.assertEqual(result["research_score"], 85)
         self.assertEqual(result["research_iteration"], 1)
+        self.assertEqual(len(result["research_results"]), 4)
         self.assertEqual(result["revision_count"], 0)
         self.assertEqual(result["sources"], ["https://example.com/research"])
 
@@ -184,7 +188,7 @@ class GraphTests(unittest.TestCase):
             self.config,
         )
 
-        self.assertEqual(self.fake_llm.research_calls, 2)
+        self.assertEqual(self.fake_llm.research_calls, 8)
         self.assertEqual(result["research_iteration"], 2)
         self.assertEqual(result["research_score"], 85)
         self.assertIn("第 2 轮补充研究", result["research_content"])
@@ -202,7 +206,10 @@ class GraphTests(unittest.TestCase):
             self.config,
         )
 
-        self.assertEqual(self.fake_llm.research_calls, MAX_RESEARCH_ITERATIONS)
+        self.assertEqual(
+            self.fake_llm.research_calls,
+            4 * MAX_RESEARCH_ITERATIONS,
+        )
         self.assertEqual(result["research_iteration"], MAX_RESEARCH_ITERATIONS)
         self.assertEqual(result["research_score"], 60)
         self.assertIn("draft", result)
@@ -233,8 +240,45 @@ class GraphTests(unittest.TestCase):
 
         self.assertEqual(first_result["revision_count"], 0)
         self.assertEqual(second_result["revision_count"], 0)
+        self.assertNotEqual(first_result["run_id"], second_result["run_id"])
+        self.assertNotIn("第一份报告", second_result["research_content"])
         self.assertTrue(second_result["plan_approved"])
         self.assertEqual(second_result["review_comment"], "测试审核意见。")
+
+    def test_dispatch_creates_one_worker_for_each_plan_task(self) -> None:
+        sends = dispatch_research_workers(
+            {
+                "run_id": "run-001",
+                "topic": "测试主题",
+                "plan": ["任务一", "任务二", "任务三"],
+                "research_iteration": 2,
+                "research_content": "第一轮资料",
+                "research_comment": "请补充数据。",
+            }
+        )
+
+        self.assertEqual(len(sends), 3)
+        self.assertTrue(all(send.node == "research_worker" for send in sends))
+        self.assertEqual(sends[0].arg["task"], "任务一")
+        self.assertEqual(sends[1].arg["task_index"], 1)
+        self.assertEqual(sends[2].arg["research_iteration"], 2)
+        self.assertEqual(sends[0].arg["existing_research"], "第一轮资料")
+        self.assertEqual(sends[0].arg["evaluation_comment"], "请补充数据。")
+
+    def test_research_workers_really_run_in_parallel(self) -> None:
+        parallel_llm = ParallelTrackingResearchLLM()
+        parallel_graph = build_graph(checkpointer=InMemorySaver())
+        config = create_run_config(str(uuid4()))
+
+        with patch("app.nodes.llm", parallel_llm):
+            self.invoke_with_approval(
+                parallel_graph,
+                "并行执行测试",
+                config,
+            )
+
+        self.assertEqual(parallel_llm.research_calls, 4)
+        self.assertGreaterEqual(parallel_llm.max_active_research_calls, 2)
 
 
 if __name__ == "__main__":

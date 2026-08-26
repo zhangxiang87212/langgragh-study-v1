@@ -95,7 +95,7 @@ class SqliteRecoveryTests(unittest.TestCase):
 
             self.assertEqual(result["review_score"], 85)
             self.assertEqual(self.fake_llm.plan_calls, 1)
-            self.assertEqual(self.fake_llm.research_calls, 1)
+            self.assertEqual(self.fake_llm.research_calls, 4)
 
     def test_sqlite_keeps_threads_independent(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -127,6 +127,14 @@ class SqliteRecoveryTests(unittest.TestCase):
             )
             config = create_run_config("failed-thread")
             working_research_method = self.fake_llm.research
+            failed_tasks = set()
+
+            def fail_one_task_once(*args, **kwargs):
+                task = kwargs["tasks"][0]
+                if task == "总结主要问题" and task not in failed_tasks:
+                    failed_tasks.add(task)
+                    raise RuntimeError("模拟网络错误")
+                return working_research_method(*args, **kwargs)
 
             with open_checkpointer(settings) as first_checkpointer:
                 first_graph = build_graph(checkpointer=first_checkpointer)
@@ -134,9 +142,7 @@ class SqliteRecoveryTests(unittest.TestCase):
                     create_initial_state("失败恢复测试"),
                     config=config,
                 )
-                self.fake_llm.research = Mock(
-                    side_effect=RuntimeError("模拟网络错误")
-                )
+                self.fake_llm.research = Mock(side_effect=fail_one_task_once)
 
                 with self.assertRaisesRegex(RuntimeError, "模拟网络错误"):
                     first_graph.invoke(
@@ -144,16 +150,18 @@ class SqliteRecoveryTests(unittest.TestCase):
                         config=config,
                     )
 
-                self.assertEqual(first_graph.get_state(config).next, ("researcher",))
+                pending_nodes = first_graph.get_state(config).next
+                self.assertEqual(pending_nodes, ("research_worker",))
 
-            self.fake_llm.research = working_research_method
             with open_checkpointer(settings) as second_checkpointer:
                 second_graph = build_graph(checkpointer=second_checkpointer)
                 result = second_graph.invoke(None, config=config)
 
             self.assertEqual(result["review_score"], 85)
             self.assertEqual(self.fake_llm.plan_calls, 1)
-            self.assertEqual(self.fake_llm.research_calls, 1)
+            # Three successful branches are restored from Checkpoint. Only the
+            # failed fourth branch calls the fake LLM again after reopening.
+            self.assertEqual(self.fake_llm.research_calls, 4)
 
 
 if __name__ == "__main__":

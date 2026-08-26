@@ -1,9 +1,9 @@
-# Mini Research Agent：第九阶段
+# Mini Research Agent：第十阶段
 
-当前阶段增加了流式执行。CLI 不再使用 `graph.invoke()` 等待整张图结束，
-而是持续消费 `graph.stream()` 产生的节点更新和自定义事件。Writer 生成报告时，
-OpenAI 和 DeepSeek 的文本都会按 token 实时显示；最终完整 State 仍由 SQLite
-保存，报告仍只写入 Markdown 文件。
+当前阶段把单个 Researcher 升级为动态 Map-Reduce。Planner 的每个任务通过
+`Send` 创建一个独立 `research_worker`，这些 Worker 在同一个 superstep 中并行
+搜索；带 Reducer 的 `research_results` 收集所有结果，再由 `research_reducer`
+按计划顺序合并。流式日志、人工审批和 SQLite 跨进程恢复继续保留。
 
 - Planner：使用结构化输出生成 3 到 6 个研究任务。
 - Plan Approval：暂停 Graph，让用户确认或替换研究计划。
@@ -15,16 +15,80 @@ OpenAI 和 DeepSeek 的文本都会按 token 实时显示；最终完整 State �
 当前工作流为：
 
 ```text
-START → planner → plan_approval → researcher → research_evaluator
-                         ↑             ↑                    │
-                  Command(resume)    资料不足             │ 资料足够
-                         ↑             └──────────────────┘
-                    用户确认/修改                           ↓
-                                                    writer → reviewer
-                                                       ↑          ├─ score >= 80 → END
-                                                       └──────────┤ score < 80
-                                                                  └─ 重写 >= 3 → END
+START → planner → plan_approval → prepare_research
+                         ↑                │
+                  Command(resume)         │ Send × N
+                         ↑                ↓
+                    用户确认/修改    ┌─ research_worker(task 1) ─┐
+                                    ├─ research_worker(task 2) ─┤
+                                    └─ research_worker(task N) ─┘
+                                                   ↓
+                                           research_reducer
+                                                   ↓
+                                      research_evaluator
+                                          │          │
+                                      资料不足      资料足够
+                                          │          ↓
+                                          └──→ prepare_research
+                                                     writer → reviewer
+                                                        ↑          ├─ 通过 → END
+                                                        └──────────┤ 未通过
 ```
+
+## 动态 Map-Reduce
+
+`prepare_research` 每轮只执行一次，用来增加 `research_iteration`。它的条件边
+根据计划动态返回多个 `Send`：
+
+```python
+return [
+    Send(
+        "research_worker",
+        {
+            "task": task,
+            "task_index": task_index,
+            "research_iteration": state["research_iteration"],
+            ...
+        },
+    )
+    for task_index, task in enumerate(state["plan"])
+]
+```
+
+计划可能有 3 到 6 项，所以 Graph 在编译时并不知道 Worker 数量。每个 `Send`
+都给同一个节点传入不同的 `ResearchWorkerState`，一个 Worker 只搜索一项任务。
+
+多个 Worker 会同时更新 `research_results`。普通 State 字段遇到并行写入会冲突，
+所以该字段使用 `operator.add` Reducer：
+
+```python
+research_results: Annotated[list[ResearchTaskResult], operator.add]
+```
+
+并行分支的完成顺序不稳定。每条结果都携带 `task_index`，Reducer 合并前会排序，
+确保最终资料始终与人工批准的计划顺序一致。结果还携带 `run_id` 和
+`research_iteration`，因此第二轮补充搜索或同一线程中的历史结果不会混入当前轮。
+一个新 run 的第 1 轮会明确忽略历史正文和来源；只有本次 run 的第 2、3 轮才累积
+上一轮资料和 Evaluator 意见。
+
+`research_reducer` 完成 fan-in，负责：
+
+- 选择当前 `run_id`、当前研究轮次的 Worker 结果。
+- 按 `task_index` 排序并生成分任务 Markdown。
+- 累积上一轮研究资料。
+- 汇总并去重来源 URL。
+- 把完整资料交给 Research Evaluator。
+
+并发上限由 `create_run_config()` 设置：
+
+```python
+{
+    "configurable": {"thread_id": thread_id},
+    "max_concurrency": 4,
+}
+```
+
+即使计划有 6 项，也最多同时运行 4 个调用，减少触发 Provider 限流的风险。
 
 ## LangGraph 流式执行
 
@@ -40,10 +104,11 @@ for part in graph.stream(
     ...
 ```
 
-- `updates`：节点完成后返回这个节点对 State 的局部更新。CLI 只打印节点名称，
+- `updates`：节点完成后返回这个节点对 State 的局部更新。并行阶段会分别产生多个
+  `research_worker` 更新。CLI 只打印节点名称，
   不把整个 State 和最终报告重复输出到控制台。
-- `custom`：节点主动发出的自定义事件。当前用于传递 Writer 的开始、token 和结束
-  三类事件。
+- `custom`：节点主动发出的自定义事件。当前用于 Writer token，以及每个
+  Research Worker 的开始和完整搜索结果。
 
 项目直接使用 OpenAI Python SDK，而不是 LangChain ChatModel，所以不能依赖
 `messages` 模式自动捕获 token。`writer_node()` 通过 `get_stream_writer()` 获取
@@ -163,11 +228,13 @@ Researcher 会把两类数据写入 State：
 - `research_content`：模型根据搜索结果整理的中文研究资料。
 - `sources`：从 Web Search 工具调用中提取并去重的来源 URL。
 
-搜索被设置为 `required`，避免模型跳过工具直接凭记忆回答。OpenAI
-模式下，每轮 Researcher 最多允许 6 次 Web Search 工具调用；Graph
-最多研究 3 轮，因此理论上限是 18 次。DeepSeek 模式下，官方文档明确
-说明 `max_tool_calls` 会被忽略，每次 Responses API 请求的服务端自动续行
-最多 10 轮；项目仍通过 Graph 的 3 轮研究上限控制总流程。
+搜索被设置为 `required`，避免模型跳过工具直接凭记忆回答。并行化会增加调用量：
+计划有 3 到 6 项时，每轮会产生 3 到 6 次 Researcher Responses 请求，最多三轮
+时累计 9 到 18 次请求；如果首轮通过则只有 3 到 6 次。OpenAI 每个请求最多允许
+6 次 Web Search 工具调用，所以
+极端理论上限是 108 次工具调用。DeepSeek 会忽略 `max_tool_calls`，仍由 Graph 的
+研究轮数和每轮 Worker 数量限制外层 Responses 请求。真实费用与计划长度、资料
+评分、模型是否使用多次搜索有关，运行前应确认额度。
 
 Reviewer 返回评分后，`review_router()` 只负责做出选择：
 
@@ -284,7 +351,8 @@ python -m app.main history --thread-id user-001
 避免旧状态和新状态意外合并。
 
 控制台会显示各节点的执行状态和每次 LLM 调用的输出：Planner 的计划、
-Researcher 的研究摘要与来源、Writer 的 token 流，以及 Reviewer 的评分与意见。
+每个并行 Researcher 的研究摘要与来源、Writer 的 token 流，以及 Reviewer 的
+评分与意见。
 每个节点成功写入 State 后还会输出一条 `节点完成` 日志。
 执行完成后，最终汇总结果还会写入：
 
@@ -307,13 +375,13 @@ python -m unittest discover -v
 
 ## 建议阅读顺序
 
-1. `app/streaming.py`：看 `updates` 和 `custom` 两类事件如何消费。
-2. `app/nodes.py`：看 Writer 如何把 token 写入 LangGraph 自定义流。
-3. `app/llm.py`：比较 OpenAI Responses 和 DeepSeek Chat 的流式事件格式。
-4. `app/main.py`：看 `run` 和 `resume` 如何共用 `run_graph_stream()`。
-5. `tests/test_streaming.py`：看真实 Graph 的暂停、恢复和 token 流测试。
-6. `app/checkpoints.py`：回顾流式执行和 SQLite Checkpoint 如何组合。
-7. `tests/test_checkpoints.py`：看关闭并重新打开数据库后如何恢复任务。
+1. `app/state.py`：先理解 Worker State、Result 和 `Annotated` Reducer。
+2. `app/graph.py`：看 `dispatch_research_workers()` 如何动态创建 `Send`。
+3. `app/nodes.py`：依次阅读 prepare、worker 和 reducer 三个节点。
+4. `tests/test_graph.py`：看动态分发和真实并发如何验证。
+5. `tests/test_checkpoints.py`：看并行分支失败后为什么只重试失败分支。
+6. `app/streaming.py`：看多个 Worker 的自定义进度事件如何消费。
+7. `app/runtime.py`：看 `max_concurrency` 如何限制并发。
 
 注意：节点返回的是局部更新，而不是完整 State。LangGraph 会把这些更新
 合并到当前 State 中，并把合并后的 State 交给下一个节点。

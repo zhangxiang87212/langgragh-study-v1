@@ -16,6 +16,7 @@ from app.main import (
     show_status,
     split_plan,
 )
+from app.runtime import MAX_RESEARCH_CONCURRENCY
 
 
 class MainTests(unittest.TestCase):
@@ -49,7 +50,10 @@ class MainTests(unittest.TestCase):
         self.assertEqual(invocation.args[1].resume, {"action": "approve"})
         self.assertEqual(
             invocation.args[2],
-            {"configurable": {"thread_id": "test-thread"}},
+            {
+                "configurable": {"thread_id": "test-thread"},
+                "max_concurrency": MAX_RESEARCH_CONCURRENCY,
+            },
         )
         finish.assert_called_once_with(
             {"draft": "测试报告"},
@@ -78,7 +82,7 @@ class MainTests(unittest.TestCase):
         )
 
     def test_resume_command_retries_a_non_interrupt_node(self) -> None:
-        graph = self.create_paused_graph("researcher")
+        graph = self.create_paused_graph("research_worker")
 
         with patch(
             "app.main.run_graph_stream",

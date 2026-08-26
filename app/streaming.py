@@ -57,3 +57,18 @@ def render_custom_event(event: dict[str, Any]) -> None:
         print(event["text"], end="", flush=True)
     elif event_type == "llm_stream_end":
         print()
+    elif event_type == "research_task_start":
+        print(
+            f"Researcher {event['task_number']}/{event['task_count']} "
+            f"开始：{event['task']}"
+        )
+    elif event_type == "research_task_result":
+        print(
+            f"Researcher {event['task_number']}/{event['task_count']} "
+            f"输出：{event['task']}\n{event['content']}"
+        )
+        print(
+            f"Researcher {event['task_number']}/{event['task_count']} 来源："
+        )
+        for source in event["sources"]:
+            print(f"- {source}")

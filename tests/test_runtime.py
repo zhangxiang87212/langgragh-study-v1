@@ -2,7 +2,12 @@
 
 import unittest
 
-from app.runtime import create_initial_state, create_run_config, create_thread_id
+from app.runtime import (
+    MAX_RESEARCH_CONCURRENCY,
+    create_initial_state,
+    create_run_config,
+    create_thread_id,
+)
 
 
 class RuntimeTests(unittest.TestCase):
@@ -15,15 +20,23 @@ class RuntimeTests(unittest.TestCase):
     def test_create_run_config_uses_configurable_thread_id(self) -> None:
         config = create_run_config("user-001")
 
-        self.assertEqual(config, {"configurable": {"thread_id": "user-001"}})
+        self.assertEqual(
+            config,
+            {
+                "configurable": {"thread_id": "user-001"},
+                "max_concurrency": MAX_RESEARCH_CONCURRENCY,
+            },
+        )
 
     def test_initial_state_resets_loop_control_fields(self) -> None:
         state = create_initial_state("测试主题")
 
         self.assertEqual(state["topic"], "测试主题")
+        self.assertTrue(state["run_id"])
         self.assertFalse(state["plan_approved"])
         self.assertEqual(state["research_comment"], "")
         self.assertEqual(state["research_iteration"], 0)
+        self.assertEqual(state["research_results"], [])
         self.assertEqual(state["review_comment"], "")
         self.assertEqual(state["revision_count"], 0)
 

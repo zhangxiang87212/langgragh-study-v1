@@ -8,8 +8,10 @@ from unittest.mock import patch
 from app.nodes import (
     plan_approval_node,
     planner_node,
+    prepare_research_round_node,
     research_evaluator_node,
-    researcher_node,
+    research_reducer_node,
+    research_worker_node,
     reviewer_node,
     writer_node,
 )
@@ -31,40 +33,81 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(list(update), ["plan"])
         self.assertEqual(len(update["plan"]), 4)
 
-    def test_researcher_returns_content_and_sources(self) -> None:
-        update = researcher_node(
+    def test_prepare_research_round_increments_iteration_once(self) -> None:
+        update = prepare_research_round_node(
             {
-                "topic": "测试主题",
                 "plan": ["任务一", "任务二"],
-            }
-        )
-
-        self.assertEqual(
-            list(update),
-            ["research_content", "sources", "research_iteration"],
-        )
-        self.assertIn("任务一、任务二", update["research_content"])
-        self.assertEqual(update["sources"], ["https://example.com/research"])
-        self.assertEqual(update["research_iteration"], 1)
-
-    def test_researcher_uses_evaluator_feedback_on_the_next_iteration(self) -> None:
-        update = researcher_node(
-            {
-                "topic": "测试主题",
-                "plan": ["任务一"],
-                "research_content": "第一轮资料",
-                "sources": ["https://example.com/research"],
-                "research_score": 60,
-                "research_comment": "需要补充官方数据。",
                 "research_iteration": 1,
             }
         )
 
-        self.assertEqual(update["research_iteration"], 2)
-        self.assertIn("第 2 轮补充研究", update["research_content"])
+        self.assertEqual(update, {"research_iteration": 2})
+
+    def test_research_worker_returns_one_reducer_update(self) -> None:
+        update = research_worker_node(self.create_worker_state())
+
+        self.assertEqual(list(update), ["research_results"])
+        self.assertEqual(len(update["research_results"]), 1)
+        result = update["research_results"][0]
+        self.assertEqual(result["task"], "任务一")
+        self.assertEqual(result["task_index"], 0)
+        self.assertEqual(result["research_iteration"], 1)
+        self.assertIn("任务一", result["content"])
+        self.assertEqual(result["sources"], ["https://example.com/research"])
+
+    def test_research_worker_uses_evaluator_feedback(self) -> None:
+        worker_state = self.create_worker_state()
+        worker_state["existing_research"] = "第一轮资料"
+        worker_state["evaluation_comment"] = "需要补充官方数据。"
+
+        research_worker_node(worker_state)
+
         self.assertEqual(
             self.fake_llm.last_research_feedback,
             "需要补充官方数据。",
+        )
+
+    def test_reducer_sorts_parallel_results_and_combines_sources(self) -> None:
+        update = research_reducer_node(
+            {
+                "run_id": "run-001",
+                "plan": ["任务一", "任务二"],
+                "research_iteration": 1,
+                "research_results": [
+                    {
+                        "run_id": "old-run",
+                        "research_iteration": 1,
+                        "task_index": 0,
+                        "task": "旧任务",
+                        "content": "不应混入的旧资料",
+                        "sources": ["https://example.com/old"],
+                    },
+                    {
+                        "run_id": "run-001",
+                        "research_iteration": 1,
+                        "task_index": 1,
+                        "task": "任务二",
+                        "content": "第二份资料",
+                        "sources": ["https://example.com/two"],
+                    },
+                    {
+                        "run_id": "run-001",
+                        "research_iteration": 1,
+                        "task_index": 0,
+                        "task": "任务一",
+                        "content": "第一份资料",
+                        "sources": ["https://example.com/one"],
+                    },
+                ],
+            }
+        )
+
+        content = update["research_content"]
+        self.assertLess(content.index("任务一"), content.index("任务二"))
+        self.assertNotIn("不应混入的旧资料", content)
+        self.assertEqual(
+            update["sources"],
+            ["https://example.com/one", "https://example.com/two"],
         )
 
     def test_research_evaluator_returns_score_and_comment(self) -> None:
@@ -148,12 +191,7 @@ class NodeTests(unittest.TestCase):
 
         with redirect_stdout(console_output):
             planner_node({"topic": "测试主题"})
-            researcher_node(
-                {
-                    "topic": "测试主题",
-                    "plan": ["测试任务"],
-                }
-            )
+            research_worker_node(self.create_worker_state())
             research_evaluator_node(
                 {
                     "topic": "测试主题",
@@ -173,12 +211,25 @@ class NodeTests(unittest.TestCase):
 
         output = console_output.getvalue()
         self.assertIn("Planner 输出", output)
-        self.assertIn("Researcher 输出", output)
+        self.assertIn("Researcher 1/2 输出", output)
         self.assertIn("Research Evaluator 输出：评分 85", output)
         self.assertIn("https://example.com/research", output)
         self.assertIn("Writer 输出", output)
         self.assertIn("Reviewer 输出：评分 85", output)
         self.assertIn("Reviewer 意见：测试审核意见。", output)
+
+    @staticmethod
+    def create_worker_state() -> dict:
+        return {
+            "run_id": "run-001",
+            "topic": "测试主题",
+            "task": "任务一",
+            "task_index": 0,
+            "task_count": 2,
+            "research_iteration": 1,
+            "existing_research": "",
+            "evaluation_comment": "",
+        }
 
 
 if __name__ == "__main__":

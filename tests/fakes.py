@@ -1,5 +1,8 @@
 """Simple test doubles for services that would otherwise call external APIs."""
 
+from threading import Lock
+from time import sleep
+
 from app.llm import ReportReview, ResearchEvaluation, ResearchResult
 
 
@@ -20,6 +23,7 @@ class FakeResearchLLM:
         self.last_research_feedback = ""
         self.last_review_comment: str | None = None
         self.last_sources: list[str] = []
+        self._counter_lock = Lock()
 
     def create_plan(self, topic: str) -> list[str]:
         self.plan_calls += 1
@@ -37,7 +41,8 @@ class FakeResearchLLM:
         existing_research: str = "",
         evaluation_comment: str = "",
     ) -> ResearchResult:
-        self.research_calls += 1
+        with self._counter_lock:
+            self.research_calls += 1
         self.last_research_feedback = evaluation_comment
         task_list = "、".join(tasks)
         return ResearchResult(
@@ -87,3 +92,28 @@ class FakeResearchLLM:
             score=self.review_score,
             comment=self.review_comment,
         )
+
+
+class ParallelTrackingResearchLLM(FakeResearchLLM):
+    """Record how many fake research calls overlap in time."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_research_calls = 0
+        self.max_active_research_calls = 0
+        self._active_lock = Lock()
+
+    def research(self, *args, **kwargs) -> ResearchResult:
+        with self._active_lock:
+            self.active_research_calls += 1
+            self.max_active_research_calls = max(
+                self.max_active_research_calls,
+                self.active_research_calls,
+            )
+
+        try:
+            sleep(0.03)
+            return super().research(*args, **kwargs)
+        finally:
+            with self._active_lock:
+                self.active_research_calls -= 1
