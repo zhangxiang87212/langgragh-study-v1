@@ -3,6 +3,7 @@
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+import re
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -56,6 +57,10 @@ class StreamingTests(unittest.TestCase):
         self.assertIn("Writer 流式输出：", output)
         self.assertIn("流式正文", output)
         self.assertIn("节点完成：writer", output)
+        self.assertRegex(
+            output,
+            re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\]"),
+        )
 
     def test_real_graph_streams_writer_tokens_and_finishes(self) -> None:
         fake_llm = FakeResearchLLM()

@@ -1,9 +1,9 @@
-# Mini Research Agent：第十阶段
+# Mini Research Agent：第十一阶段
 
-当前阶段把单个 Researcher 升级为动态 Map-Reduce。Planner 的每个任务通过
-`Send` 创建一个独立 `research_worker`，这些 Worker 在同一个 superstep 中并行
-搜索；带 Reducer 的 `research_results` 收集所有结果，再由 `research_reducer`
-按计划顺序合并。流式日志、人工审批和 SQLite 跨进程恢复继续保留。
+当前阶段为所有付费模型节点增加容错和成本控制。LangGraph 的节点级
+`RetryPolicy` 负责瞬时故障重试和指数退避；调用包装器负责同步 Provider 的超时；
+持久化的用量事件与预算路由负责在开始下一批付费调用前停止工作流。第十阶段的
+动态 Map-Reduce、流式日志、人工审批和 SQLite 跨进程恢复继续保留。
 
 - Planner：使用结构化输出生成 3 到 6 个研究任务。
 - Plan Approval：暂停 Graph，让用户确认或替换研究计划。
@@ -34,6 +34,96 @@ START → planner → plan_approval → prepare_research
                                                         ↑          ├─ 通过 → END
                                                         └──────────┤ 未通过
 ```
+
+所有可能产生费用的路径之前都有预算检查。预算不足时不再调用模型，而是进入
+`budget_exhausted` 生成一份明确标注“提前结束”的结果，然后前往 `END`。
+
+## 容错与指数退避
+
+`build_graph()` 为 Planner、Research Worker、Research Evaluator、Writer 和
+Reviewer 配置同一份 LangGraph `RetryPolicy`：
+
+```python
+builder.add_node(
+    "research_worker",
+    research_worker_node,
+    retry_policy=resilience.retry_policy(),
+)
+```
+
+一次节点尝试遇到以下瞬时错误时会自动重试：连接失败、Provider 超时、限流、
+HTTP 408/409/429 和 5xx。参数错误、数据校验错误等永久错误不会重试，避免重复
+发送一个注定失败的请求。默认最多尝试 3 次，等待约为 1 秒、2 秒，并加入随机
+抖动；间隔最大不超过 30 秒。
+
+同步 OpenAI/DeepSeek SDK 调用由 `call_with_timeout()` 放入工作线程，并使用
+`future.result(timeout=...)` 设置调用方截止时间。超时会抛出 LangGraph
+`NodeTimeoutError` 的子类，因此仍可由同一份 `RetryPolicy` 处理。新线程会显式
+复制 `contextvars`，保证 Writer token 和 Researcher 自定义事件仍能写入当前
+LangGraph stream。
+
+这里的截止时间能让 Graph 及时失败，但 Python 无法强行终止已经进入网络库的
+线程；底层请求可能继续到 SDK 自身返回。因此生产部署还应让反向代理和 Provider
+SDK 的网络超时不大于 `LLM_NODE_TIMEOUT_SECONDS`。
+
+重试耗尽后，异常会离开当前节点。Checkpoint 保留最近一次成功 superstep；修复
+外部故障后执行 `resume --thread-id ...`，LangGraph 只会重新调度快照中的待执行
+节点，不重跑已经提交的上游节点。官方原理说明见
+[LangGraph Fault tolerance](https://docs.langchain.com/oss/python/langgraph/fault-tolerance)。
+
+## 用量与预算
+
+每个成功的模型节点返回一个 `UsageEvent`。`usage_events` 使用 `operator.add`
+Reducer，所以多个并行 Research Worker 的用量可以安全合并，并随 Checkpoint
+一起保存。事件记录 LLM 调用数、搜索调用数、输入/输出 Token 和费用。
+
+当前 OpenAI Responses 与 DeepSeek Responses/Chat 接口返回的用量结构并不完全
+一致，所以本阶段统一采用透明估算：`ceil(文本字符数 / 3)`。报告和控制台都明确
+标为“估算”。费用由估算 Token 乘以 `.env` 中用户配置的每百万 Token 单价得到；
+单价为 0 时只统计 Token，不产生虚假的费用数字。
+
+预算路由在下一步执行前调用 `budget_exceeded_reason()`：
+
+- 并行研究开始前，一次性预留计划任务数对应的 LLM 调用额度。
+- Evaluator、Writer、Reviewer 和重写开始前，各预留 1 次调用额度。
+- 已达到 Token 或费用上限时，不再启动下一个付费节点。
+- `SEARCH_MAX_ROUNDS` 控制最多进行几轮并行搜索。
+
+Token 和费用只能在响应完成后得知，因此单次调用可能让累计值略微越过上限；保护
+会阻止下一次调用。`LLM_MAX_CALLS` 是成功提交到 State 的逻辑调用数，LangGraph
+内部因瞬时错误产生的失败重试不会写入 State，用量应再与 Provider 账单核对。
+
+相关配置如下：
+
+```dotenv
+LLM_RETRY_MAX_ATTEMPTS=3
+LLM_RETRY_INITIAL_INTERVAL=1
+LLM_RETRY_BACKOFF_FACTOR=2
+LLM_RETRY_MAX_INTERVAL=30
+LLM_NODE_TIMEOUT_SECONDS=120
+
+LLM_MAX_CALLS=30
+SEARCH_MAX_ROUNDS=3
+LLM_MAX_TOTAL_TOKENS=0
+LLM_MAX_COST_USD=0
+LLM_INPUT_COST_PER_MILLION=0
+LLM_OUTPUT_COST_PER_MILLION=0
+```
+
+Token、费用上限和单价配置为 `0` 表示不启用对应限制。运行中的配置会复制进
+初始 State，所以暂停后修改 `.env` 不会悄悄改变该任务原有预算。
+
+## 幂等结果写入
+
+结果文件名由稳定的 `run_id` 决定：
+
+```text
+outputs/research-report-{run_id}.md
+```
+
+`save_result()` 先写同目录临时文件，再用原子 `replace()` 提交。相同 run 恢复后
+如果目标文件已经存在，会直接返回原路径，不会生成第二份报告，也不会覆盖已提交
+内容。LLM 节点只返回 State 更新，不在节点内部写最终文件。
 
 ## 动态 Map-Reduce
 
@@ -357,11 +447,11 @@ python -m app.main history --thread-id user-001
 执行完成后，最终汇总结果还会写入：
 
 ```text
-outputs/research-report-时间戳.md
+outputs/research-report-{run_id}.md
 ```
 
-文件内容包括报告正文、人工确认后的研究计划、研究评估、审核信息和来源。`outputs/`
-属于运行产物目录，已被 Git 忽略。
+文件内容包括报告正文、人工确认后的研究计划、研究评估、审核信息、来源、估算
+Token/费用和预算结束原因。`outputs/` 属于运行产物目录，已被 Git 忽略。
 
 运行测试：
 
@@ -369,9 +459,8 @@ outputs/research-report-时间戳.md
 python -m unittest discover -v
 ```
 
-测试使用 `FakeResearchLLM`，不会访问网络，也不会消耗 API 额度。一次正常运行
-至少调用模型 4 次，并发生至少一次收费的 Web Search 工具调用；每轮重写会再
-调用 Writer 和 Reviewer 各一次。
+测试使用 `FakeResearchLLM`，不会访问网络，也不会消耗 API 额度。测试覆盖瞬时
+错误重试、永久错误分类、节点超时、调用预算、搜索轮数、用量费用与幂等文件写入。
 
 ## 建议阅读顺序
 

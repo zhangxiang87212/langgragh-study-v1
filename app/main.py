@@ -15,6 +15,7 @@ from app.checkpoints import (
 from app.config import ConfigurationError
 from app.graph import build_graph
 from app.output import save_result
+from app.resilience import ResilienceConfigurationError, summarize_usage
 from app.runtime import create_initial_state, create_run_config, create_thread_id
 from app.streaming import run_graph_stream
 
@@ -59,7 +60,11 @@ def main() -> None:
         with open_checkpointer(checkpoint_settings) as checkpointer:
             graph = build_graph(checkpointer=checkpointer)
             execute_command(graph, arguments)
-    except (ConfigurationError, CheckpointConfigurationError) as error:
+    except (
+        ConfigurationError,
+        CheckpointConfigurationError,
+        ResilienceConfigurationError,
+    ) as error:
         print(f"配置错误：{error}", file=sys.stderr)
         raise SystemExit(1) from error
     except OpenAIError as error:
@@ -165,6 +170,13 @@ def show_status(graph, thread_id: str) -> None:
     print(f"线程 ID：{thread_id}")
     print(f"研究主题：{snapshot.values.get('topic', '未知')}")
     print(f"当前状态：{describe_snapshot(snapshot)}")
+    usage = summarize_usage(snapshot.values)
+    print(
+        f"资源用量：LLM {usage['llm_calls']} 次，"
+        f"搜索 {usage['search_calls']} 次，"
+        f"约 {usage['total_tokens']} tokens，"
+        f"${usage['cost_usd']:.6f}"
+    )
     if snapshot.next:
         print(f"下一节点：{', '.join(snapshot.next)}")
 

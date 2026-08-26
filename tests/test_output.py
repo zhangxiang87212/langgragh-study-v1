@@ -10,6 +10,7 @@ from app.output import build_result_document, save_result
 class OutputTests(unittest.TestCase):
     def setUp(self) -> None:
         self.result = {
+            "run_id": "run-001",
             "topic": "测试主题",
             "plan": ["研究背景", "总结趋势"],
             "plan_approved": True,
@@ -24,6 +25,7 @@ class OutputTests(unittest.TestCase):
             "review_score": 86,
             "review_comment": "报告符合要求。",
             "revision_count": 1,
+            "usage_events": [],
         }
 
     def test_build_result_document_contains_report_and_metadata(self) -> None:
@@ -49,6 +51,22 @@ class OutputTests(unittest.TestCase):
                 output_path.read_text(encoding="utf-8"),
                 build_result_document(self.result),
             )
+
+    def test_saving_the_same_run_twice_is_idempotent(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            output_directory = Path(temporary_directory)
+            first_path = save_result(self.result, output_directory)
+            first_content = first_path.read_text(encoding="utf-8")
+
+            self.result["draft"] = "# 不应覆盖已经提交的报告"
+            second_path = save_result(self.result, output_directory)
+
+            self.assertEqual(second_path, first_path)
+            self.assertEqual(
+                second_path.read_text(encoding="utf-8"),
+                first_content,
+            )
+            self.assertEqual(list(output_directory.glob("*.md")), [first_path])
 
 
 if __name__ == "__main__":

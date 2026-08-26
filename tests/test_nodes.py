@@ -30,7 +30,7 @@ class NodeTests(unittest.TestCase):
     def test_planner_returns_a_four_step_plan(self) -> None:
         update = planner_node({"topic": "测试主题"})
 
-        self.assertEqual(list(update), ["plan"])
+        self.assertEqual(list(update), ["plan", "usage_events"])
         self.assertEqual(len(update["plan"]), 4)
 
     def test_prepare_research_round_increments_iteration_once(self) -> None:
@@ -46,7 +46,7 @@ class NodeTests(unittest.TestCase):
     def test_research_worker_returns_one_reducer_update(self) -> None:
         update = research_worker_node(self.create_worker_state())
 
-        self.assertEqual(list(update), ["research_results"])
+        self.assertEqual(list(update), ["research_results", "usage_events"])
         self.assertEqual(len(update["research_results"]), 1)
         result = update["research_results"][0]
         self.assertEqual(result["task"], "任务一")
@@ -148,7 +148,10 @@ class NodeTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(list(update), ["draft", "revision_count"])
+        self.assertEqual(
+            list(update),
+            ["draft", "revision_count", "usage_events"],
+        )
         self.assertIn("测试主题", update["draft"])
         self.assertIn("测试资料", update["draft"])
         self.assertEqual(update["revision_count"], 0)

@@ -1,26 +1,48 @@
 """Node functions for the research workflow."""
 
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from langgraph.config import get_stream_writer
 from langgraph.types import interrupt
 
+from app.console import current_timestamp, print_log
 from app.llm import llm
-from app.state import ResearchState, ResearchTaskResult, ResearchWorkerState
+from app.resilience import (
+    DEFAULT_NODE_TIMEOUT_SECONDS,
+    budget_exceeded_reason,
+    call_with_timeout,
+    create_usage_event,
+    summarize_usage,
+)
+from app.state import (
+    ResearchState,
+    ResearchTaskResult,
+    ResearchWorkerState,
+    UsageEvent,
+)
 
 
-def planner_node(state: ResearchState) -> dict[str, list[str]]:
+LLMResult = TypeVar("LLMResult")
+
+
+def planner_node(state: ResearchState) -> dict[str, object]:
     """Ask the LLM to break the topic into concrete research tasks."""
 
     topic = state["topic"]
     print(f"正在规划研究任务：{topic}")
 
-    plan = llm.create_plan(topic)
+    plan, usage = _run_llm_call(
+        state,
+        operation="Planner",
+        input_text=topic,
+        function=lambda: llm.create_plan(topic),
+        output_text=lambda tasks: "\n".join(tasks),
+    )
     print("Planner 输出：")
     for index, task in enumerate(plan, start=1):
         print(f"{index}. {task}")
 
-    return {"plan": plan}
+    return {"plan": plan, "usage_events": [usage]}
 
 
 def plan_approval_node(state: ResearchState) -> dict[str, Any]:
@@ -78,7 +100,7 @@ def prepare_research_round_node(state: ResearchState) -> dict[str, int]:
 
 def research_worker_node(
     state: ResearchWorkerState,
-) -> dict[str, list[ResearchTaskResult]]:
+) -> dict[str, object]:
     """Research one plan task in an isolated parallel worker."""
 
     task_number = state["task_index"] + 1
@@ -86,26 +108,38 @@ def research_worker_node(
     if stream_writer is not None:
         stream_writer({
             "event": "research_task_start",
+            "timestamp": current_timestamp(),
             "task_number": task_number,
             "task_count": state["task_count"],
             "task": state["task"],
         })
     else:
-        print(
+        print_log(
             f"Researcher {task_number}/{state['task_count']} 开始："
             f"{state['task']}"
         )
 
-    research = llm.research(
-        topic=state["topic"],
-        tasks=[state["task"]],
-        existing_research=state["existing_research"],
-        evaluation_comment=state["evaluation_comment"],
+    research, usage = _run_llm_call(
+        state,
+        operation=f"Researcher {task_number}/{state['task_count']}",
+        input_text=(
+            f"{state['topic']}\n{state['task']}\n"
+            f"{state['existing_research']}\n{state['evaluation_comment']}"
+        ),
+        function=lambda: llm.research(
+            topic=state["topic"],
+            tasks=[state["task"]],
+            existing_research=state["existing_research"],
+            evaluation_comment=state["evaluation_comment"],
+        ),
+        output_text=lambda result: result.content,
+        search_call=True,
     )
 
     if stream_writer is not None:
         stream_writer({
             "event": "research_task_result",
+            "timestamp": current_timestamp(),
             "task_number": task_number,
             "task_count": state["task_count"],
             "task": state["task"],
@@ -129,7 +163,10 @@ def research_worker_node(
         "content": research.content,
         "sources": research.sources,
     }
-    return {"research_results": [result]}
+    return {
+        "research_results": [result],
+        "usage_events": [usage],
+    }
 
 
 def research_reducer_node(
@@ -191,8 +228,8 @@ def _print_research_result(
 ) -> None:
     """Print one complete worker result without interleaving token output."""
 
-    print(f"Researcher {task_number}/{task_count} 输出：{task}\n{content}")
-    print(f"Researcher {task_number}/{task_count} 来源：")
+    print_log(f"Researcher {task_number}/{task_count} 输出：{task}\n{content}")
+    print_log(f"Researcher {task_number}/{task_count} 来源：")
     for source in sources:
         print(f"- {source}")
 
@@ -214,15 +251,24 @@ def _combine_research_content(
     )
 
 
-def research_evaluator_node(state: ResearchState) -> dict[str, int | str]:
+def research_evaluator_node(state: ResearchState) -> dict[str, object]:
     """Evaluate whether the collected research can support report writing."""
 
     print("正在评估研究资料...")
-    evaluation = llm.evaluate_research(
-        topic=state["topic"],
-        tasks=state["plan"],
-        research_content=state["research_content"],
-        sources=state["sources"],
+    evaluation, usage = _run_llm_call(
+        state,
+        operation="Research Evaluator",
+        input_text=(
+            f"{state['topic']}\n{state['plan']}\n"
+            f"{state['research_content']}\n{state['sources']}"
+        ),
+        function=lambda: llm.evaluate_research(
+            topic=state["topic"],
+            tasks=state["plan"],
+            research_content=state["research_content"],
+            sources=state["sources"],
+        ),
+        output_text=lambda result: f"{result.score}\n{result.comment}",
     )
     print(f"Research Evaluator 输出：评分 {evaluation.score}")
     print(f"Research Evaluator 意见：{evaluation.comment}")
@@ -230,10 +276,11 @@ def research_evaluator_node(state: ResearchState) -> dict[str, int | str]:
     return {
         "research_score": evaluation.score,
         "research_comment": evaluation.comment,
+        "usage_events": [usage],
     }
 
 
-def writer_node(state: ResearchState) -> dict[str, str | int]:
+def writer_node(state: ResearchState) -> dict[str, object]:
     """Ask the LLM to write or revise the report draft."""
 
     review_comment = state.get("review_comment")
@@ -261,12 +308,21 @@ def writer_node(state: ResearchState) -> dict[str, str | int]:
         token_callback = send_token
 
     try:
-        draft = llm.write_report(
-            topic=topic,
-            research_content=research_content,
-            sources=state["sources"],
-            review_comment=review_comment,
-            on_token=token_callback,
+        draft, usage = _run_llm_call(
+            state,
+            operation="Writer",
+            input_text=(
+                f"{topic}\n{research_content}\n{state['sources']}\n"
+                f"{review_comment or ''}"
+            ),
+            function=lambda: llm.write_report(
+                topic=topic,
+                research_content=research_content,
+                sources=state["sources"],
+                review_comment=review_comment,
+                on_token=token_callback,
+            ),
+            output_text=lambda result: result,
         )
     finally:
         if stream_writer is not None:
@@ -278,6 +334,7 @@ def writer_node(state: ResearchState) -> dict[str, str | int]:
     return {
         "draft": draft,
         "revision_count": revision_count,
+        "usage_events": [usage],
     }
 
 
@@ -290,16 +347,89 @@ def _get_stream_writer_or_none():
         return None
 
 
-def reviewer_node(state: ResearchState) -> dict[str, int | str]:
+def reviewer_node(state: ResearchState) -> dict[str, object]:
     """Ask the LLM for a structured score and review comment."""
 
     print("正在审核报告...")
 
-    review = llm.review_report(state["draft"])
+    review, usage = _run_llm_call(
+        state,
+        operation="Reviewer",
+        input_text=state["draft"],
+        function=lambda: llm.review_report(state["draft"]),
+        output_text=lambda result: f"{result.score}\n{result.comment}",
+    )
     print(f"Reviewer 输出：评分 {review.score}")
     print(f"Reviewer 意见：{review.comment}")
 
     return {
         "review_score": review.score,
         "review_comment": review.comment,
+        "usage_events": [usage],
     }
+
+
+def budget_exhausted_node(state: ResearchState) -> dict[str, object]:
+    """Finish safely without another paid call after a budget guard trips."""
+
+    reason = (
+        state.get("termination_reason")
+        or budget_exceeded_reason(state, 1)
+        or budget_exceeded_reason(state, len(state.get("plan", [])))
+        or "下一阶段所需调用会超过运行预算。"
+    )
+    print(f"预算保护触发：{reason}")
+    draft = state.get("draft")
+    if not draft:
+        draft = (
+            f"# {state['topic']}\n\n"
+            "研究任务因预算保护提前结束，未生成完整报告。\n\n"
+            f"原因：{reason}"
+        )
+    return {
+        "draft": draft,
+        "sources": state.get("sources", []),
+        "research_score": state.get("research_score", 0),
+        "research_comment": state.get("research_comment", reason),
+        "review_score": state.get("review_score", 0),
+        "review_comment": state.get("review_comment", "未执行审核。"),
+        "budget_exhausted": True,
+        "termination_reason": reason,
+    }
+
+
+def _run_llm_call(
+    state: dict,
+    *,
+    operation: str,
+    input_text: str,
+    function: Callable[[], LLMResult],
+    output_text: Callable[[LLMResult], str],
+    search_call: bool = False,
+) -> tuple[LLMResult, UsageEvent]:
+    """Apply the same timeout and usage accounting to every provider call."""
+
+    result = call_with_timeout(
+        operation,
+        state.get("node_timeout_seconds", DEFAULT_NODE_TIMEOUT_SECONDS),
+        function,
+    )
+    event = create_usage_event(
+        operation,
+        input_text,
+        output_text(result),
+        state,
+        search_call=search_call,
+    )
+    run_id = state.get("run_id", "direct-node-call")
+    event["run_id"] = run_id
+    usage = summarize_usage({
+        **state,
+        "run_id": run_id,
+        "usage_events": [*state.get("usage_events", []), event],
+    })
+    print(
+        f"LLM 用量：{operation} | 本次约 {event['total_tokens']} tokens | "
+        f"累计调用 {usage['llm_calls']} 次 | 累计费用 ${usage['cost_usd']:.6f}"
+    )
+    return result, event

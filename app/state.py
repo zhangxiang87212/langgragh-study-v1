@@ -26,6 +26,23 @@ class ResearchWorkerState(TypedDict):
     research_iteration: int
     existing_research: str
     evaluation_comment: str
+    node_timeout_seconds: float
+    input_cost_per_million: float
+    output_cost_per_million: float
+
+
+class UsageEvent(TypedDict):
+    """Persisted usage for one successful logical LLM call."""
+
+    run_id: str
+    operation: str
+    llm_calls: int
+    search_calls: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost_usd: float
+    estimated: bool
 
 
 class ResearchState(TypedDict, total=False):
@@ -49,3 +66,13 @@ class ResearchState(TypedDict, total=False):
     review_score: int
     review_comment: str
     revision_count: int
+    usage_events: Annotated[list[UsageEvent], operator.add]
+    max_llm_calls: int
+    max_search_rounds: int
+    max_total_tokens: int
+    max_cost_usd: float
+    input_cost_per_million: float
+    output_cost_per_million: float
+    node_timeout_seconds: float
+    budget_exhausted: bool
+    termination_reason: str

@@ -1,8 +1,8 @@
 """Build and save the final research result."""
 
-from datetime import datetime
 from pathlib import Path
 
+from app.resilience import summarize_usage
 from app.state import ResearchState
 
 
@@ -17,6 +17,7 @@ def build_result_document(state: ResearchState) -> str:
         for index, task in enumerate(state["plan"], start=1)
     )
     source_list = "\n".join(f"- {source}" for source in state["sources"])
+    usage = summarize_usage(state)
     run_summary = (
         "## 执行信息\n\n"
         f"- 研究主题：{state['topic']}\n"
@@ -25,7 +26,13 @@ def build_result_document(state: ResearchState) -> str:
         f"- 研究轮数：{state['research_iteration']}\n"
         f"- 审核分数：{state['review_score']}\n"
         f"- 审核意见：{state['review_comment']}\n"
-        f"- 重写次数：{state['revision_count']}"
+        f"- 重写次数：{state['revision_count']}\n"
+        f"- LLM 调用：{usage['llm_calls']} 次\n"
+        f"- 搜索调用：{usage['search_calls']} 次\n"
+        f"- 估算 Token：{usage['total_tokens']}\n"
+        f"- 估算费用：${usage['cost_usd']:.6f}\n"
+        f"- 预算提前结束：{'是' if state.get('budget_exhausted') else '否'}\n"
+        f"- 结束原因：{state.get('termination_reason') or '正常完成'}"
     )
 
     return (
@@ -43,11 +50,15 @@ def save_result(
     state: ResearchState,
     output_directory: Path = DEFAULT_OUTPUT_DIRECTORY,
 ) -> Path:
-    """Write the final result to a uniquely named UTF-8 Markdown file."""
+    """Atomically write one deterministic result file for each run."""
 
     output_directory.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    output_path = output_directory / f"research-report-{timestamp}.md"
-    output_path.write_text(build_result_document(state), encoding="utf-8")
+    output_path = output_directory / f"research-report-{state['run_id']}.md"
+    if output_path.exists():
+        return output_path
+
+    temporary_path = output_path.with_suffix(".md.tmp")
+    temporary_path.write_text(build_result_document(state), encoding="utf-8")
+    temporary_path.replace(output_path)
 
     return output_path

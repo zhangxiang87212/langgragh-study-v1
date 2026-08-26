@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from app.console import print_log
+
 
 STREAM_MODES = ["updates", "custom"]
 
@@ -42,7 +44,7 @@ def render_state_updates(updates: dict[str, Any], current_interrupt):
         if node_name == "__interrupt__":
             interrupt_update = update
         else:
-            print(f"节点完成：{node_name}")
+            print_log(f"节点完成：{node_name}")
 
     return interrupt_update
 
@@ -52,22 +54,24 @@ def render_custom_event(event: dict[str, Any]) -> None:
 
     event_type = event.get("event")
     if event_type == "llm_stream_start":
-        print(f"{event['node']} 流式输出：")
+        print_log(f"{event['node']} 流式输出：")
     elif event_type == "llm_token":
         print(event["text"], end="", flush=True)
     elif event_type == "llm_stream_end":
         print()
     elif event_type == "research_task_start":
-        print(
+        print_log(
             f"Researcher {event['task_number']}/{event['task_count']} "
-            f"开始：{event['task']}"
+            f"开始：{event['task']}",
+            timestamp=event.get("timestamp"),
         )
     elif event_type == "research_task_result":
-        print(
+        print_log(
             f"Researcher {event['task_number']}/{event['task_count']} "
-            f"输出：{event['task']}\n{event['content']}"
+            f"输出：{event['task']}\n{event['content']}",
+            timestamp=event.get("timestamp"),
         )
-        print(
+        print_log(
             f"Researcher {event['task_number']}/{event['task_count']} 来源："
         )
         for source in event["sources"]:

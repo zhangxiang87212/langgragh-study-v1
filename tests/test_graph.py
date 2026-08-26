@@ -141,6 +141,16 @@ class GraphTests(unittest.TestCase):
             "review_score",
             "review_comment",
             "revision_count",
+            "usage_events",
+            "max_llm_calls",
+            "max_search_rounds",
+            "max_total_tokens",
+            "max_cost_usd",
+            "input_cost_per_million",
+            "output_cost_per_million",
+            "node_timeout_seconds",
+            "budget_exhausted",
+            "termination_reason",
         }
         self.assertEqual(set(result), expected_keys)
         self.assertEqual(result["topic"], "测试主题")
@@ -150,6 +160,7 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(len(result["research_results"]), 4)
         self.assertEqual(result["revision_count"], 0)
         self.assertEqual(result["sources"], ["https://example.com/research"])
+        self.assertEqual(len(result["usage_events"]), 8)
 
     def test_graph_pauses_before_research(self) -> None:
         paused_result = graph.invoke(
