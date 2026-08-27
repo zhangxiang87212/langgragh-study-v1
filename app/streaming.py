@@ -43,6 +43,10 @@ def render_state_updates(updates: dict[str, Any], current_interrupt):
     for node_name, update in updates.items():
         if node_name == "__interrupt__":
             interrupt_update = update
+        elif node_name.startswith("__"):
+            # Checkpoint 重放可能带出 __metadata__ 等内部事件。
+            # 它们不是业务节点，不应出现在用户日志中。
+            continue
         else:
             print_log(f"节点完成：{node_name}")
 

@@ -1,6 +1,10 @@
-# Mini Research Agent：第十一阶段
+# Mini Research Agent：第十二阶段
 
-当前阶段为所有付费模型节点增加容错和成本控制。LangGraph 的节点级
+当前阶段增加 Checkpoint 时间旅行与人工修正：可以查看历史状态，从任意历史
+Checkpoint 创建独立线程分支，修改研究计划、删除错误资料或补充人工证据，并从
+修正点之后继续执行。原线程不会被修改，修正点之前已经完成的昂贵节点也不会重跑。
+
+第十一阶段为所有付费模型节点增加的容错和成本控制继续保留。LangGraph 的节点级
 `RetryPolicy` 负责瞬时故障重试和指数退避；调用包装器负责同步 Provider 的超时；
 持久化的用量事件与预算路由负责在开始下一批付费调用前停止工作流。第十阶段的
 动态 Map-Reduce、流式日志、人工审批和 SQLite 跨进程恢复继续保留。
@@ -436,6 +440,95 @@ python -m app.main status --thread-id user-001
 ```bash
 python -m app.main history --thread-id user-001
 ```
+
+输出中的 `checkpoint_id` 是一次历史快照的精确标识，`next` 表示从该快照恢复时
+准备执行的节点。先选择一个包含待修改数据的 Checkpoint，再创建分支。
+
+审查最新 Checkpoint 中的资料和来源：
+
+```bash
+python -m app.main inspect --thread-id user-001
+```
+
+审查指定的历史 Checkpoint：
+
+```bash
+python -m app.main inspect \
+  --thread-id user-001 \
+  --checkpoint-id 1f0...
+```
+
+默认把审查内容打印到控制台。资料较多时，可以写入 Markdown 文件：
+
+```bash
+python -m app.main inspect \
+  --thread-id user-001 \
+  --checkpoint-id 1f0... \
+  --output outputs/user-001-checkpoint-review.md
+```
+
+`inspect` 是只读命令，不执行 Graph 节点，也不调用 LLM。审查文档包含 Checkpoint
+位置、研究计划、Evaluator 评分和意见、每个 Worker 的原始资料及其来源、Reducer
+汇总来源、自动风险提示、人工核验清单和可复制的 `fork` 命令。自动提示只检查来源
+为空、Worker 无来源、Evaluator 低于 80 分等 State 内部结构问题；URL 是否可访问、
+来源是否权威、资料是否过期以及原文能否支持研究结论，仍需要人工核验。
+
+## 时间旅行与人工修正
+
+`fork` 会把指定 Checkpoint 的 State 复制到一个全新的线程。新线程拥有新的
+`run_id`，因此 Checkpoint 历史和最终报告文件都与原任务隔离。程序使用
+`graph.update_state(..., as_node=...)` 把修正后的 State 写入分支，并告诉 LangGraph
+应把这次人工更新视为哪个节点的输出；随后用 `graph.stream(None, ...)` 从该节点的
+后继节点继续执行。
+
+修改 Planner 产生的计划：
+
+```bash
+python -m app.main fork \
+  --thread-id user-001 \
+  --checkpoint-id 1f0... \
+  --new-thread-id user-001-plan-v2 \
+  --plan "研究官方政策；核验行业数据；分析典型案例"
+```
+
+这类分支把人工修改视为 `plan_approval` 的结果，下一节点是
+`prepare_research`。Planner 不会再次调用，旧计划产生的研究资料和下游草稿会被
+清空，然后按新计划研究。
+
+删除错误来源、删除错误文字并补充人工证据：
+
+```bash
+python -m app.main fork \
+  --thread-id user-001 \
+  --checkpoint-id 1f0... \
+  --new-thread-id user-001-evidence-v2 \
+  --remove-source "https://wrong.example/article" \
+  --remove-text "这段结论已经被证伪" \
+  --evidence "人工核验：官方统计为 42%。来源 https://official.example/data"
+```
+
+`--remove-source`、`--remove-text` 和 `--evidence` 都可以重复传入。人工证据中的
+HTTP/HTTPS 链接会自动加入来源列表。这类分支把修正后的 State 视为
+`research_reducer` 的输出，因此直接从 `research_evaluator` 开始；Planner 和已经
+完成的 Research Worker 不会重跑。若 Evaluator 判断修正后的资料仍不足，正常的
+研究循环仍可能开启一轮新的补充搜索。
+
+也可以不提供修正参数，只把一个尚未结束的历史 Checkpoint 复制到新线程后按其
+`next` 节点重放：
+
+```bash
+python -m app.main fork \
+  --thread-id user-001 \
+  --checkpoint-id 1f0...
+```
+
+程序会自动生成分支 `thread_id` 并打印出来。已经结束的 Checkpoint 没有后继节点，
+因此必须提供计划或资料修正才能创建可执行分支。
+
+分支会继承真正复用的历史用量，并把这些 `UsageEvent` 标记为 `inherited`；预算统计
+仍包含这部分已经发生的 Token 和费用。修改计划时只保留 Planner 用量，修正资料时
+保留 Planner 和 Researcher 用量，准备重跑的 Evaluator、Writer、Reviewer 的旧
+用量会被删除，避免重复累计。
 
 每个新任务应该使用新的 `thread_id`。如果 `run` 发现 ID 已存在，会拒绝覆盖，
 避免旧状态和新状态意外合并。

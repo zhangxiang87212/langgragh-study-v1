@@ -18,6 +18,12 @@ def build_result_document(state: ResearchState) -> str:
     )
     source_list = "\n".join(f"- {source}" for source in state["sources"])
     usage = summarize_usage(state)
+    branch_summary = ""
+    if state.get("parent_thread_id"):
+        branch_summary = (
+            f"\n- 来源线程：{state['parent_thread_id']}"
+            f"\n- 来源 Checkpoint：{state['parent_checkpoint_id']}"
+        )
     run_summary = (
         "## 执行信息\n\n"
         f"- 研究主题：{state['topic']}\n"
@@ -33,6 +39,7 @@ def build_result_document(state: ResearchState) -> str:
         f"- 估算费用：${usage['cost_usd']:.6f}\n"
         f"- 预算提前结束：{'是' if state.get('budget_exhausted') else '否'}\n"
         f"- 结束原因：{state.get('termination_reason') or '正常完成'}"
+        f"{branch_summary}"
     )
 
     return (

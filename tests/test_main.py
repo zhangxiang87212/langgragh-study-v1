@@ -11,6 +11,7 @@ from langgraph.types import Command
 
 from app.main import (
     finish_or_report_interrupt,
+    inspect_research,
     parse_arguments,
     resume_research,
     show_status,
@@ -28,6 +29,63 @@ class MainTests(unittest.TestCase):
         self.assertEqual(arguments.command, "run")
         self.assertEqual(arguments.topic, "测试主题")
         self.assertEqual(arguments.thread_id, "test-thread")
+
+    def test_fork_command_accepts_repeatable_evidence_changes(self) -> None:
+        arguments = parse_arguments([
+            "fork",
+            "--thread-id",
+            "source-thread",
+            "--checkpoint-id",
+            "checkpoint-001",
+            "--remove-source",
+            "https://wrong.example",
+            "--evidence",
+            "人工证据一",
+            "--evidence",
+            "人工证据二",
+        ])
+
+        self.assertEqual(arguments.command, "fork")
+        self.assertEqual(arguments.remove_source, ["https://wrong.example"])
+        self.assertEqual(arguments.evidence, ["人工证据一", "人工证据二"])
+
+    def test_inspect_command_can_select_a_checkpoint_and_output_file(self) -> None:
+        arguments = parse_arguments([
+            "inspect",
+            "--thread-id",
+            "source-thread",
+            "--checkpoint-id",
+            "checkpoint-001",
+            "--output",
+            "outputs/review.md",
+        ])
+
+        self.assertEqual(arguments.command, "inspect")
+        self.assertEqual(arguments.checkpoint_id, "checkpoint-001")
+        self.assertEqual(arguments.output, "outputs/review.md")
+
+    def test_inspection_does_not_run_any_graph_node(self) -> None:
+        graph = Mock()
+        snapshot = SimpleNamespace(
+            values={"topic": "测试主题", "run_id": "run-001"},
+            config={"configurable": {"checkpoint_id": "checkpoint-001"}},
+            metadata={"step": 1},
+            next=("plan_approval",),
+        )
+        graph.get_state.return_value = snapshot
+        console_output = StringIO()
+
+        with redirect_stdout(console_output):
+            inspect_research(
+                graph,
+                thread_id="test-thread",
+                checkpoint_id=None,
+                output=None,
+            )
+
+        graph.invoke.assert_not_called()
+        graph.stream.assert_not_called()
+        self.assertIn("Checkpoint 资料审查", console_output.getvalue())
 
     def test_resume_command_builds_an_approval_command(self) -> None:
         graph = self.create_paused_graph("plan_approval")

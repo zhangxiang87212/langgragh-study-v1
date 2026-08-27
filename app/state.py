@@ -1,7 +1,7 @@
 """State schemas used by the main graph and parallel research workers."""
 
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 
 class ResearchTaskResult(TypedDict):
@@ -43,6 +43,7 @@ class UsageEvent(TypedDict):
     total_tokens: int
     cost_usd: float
     estimated: bool
+    inherited: NotRequired[bool]
 
 
 class ResearchState(TypedDict, total=False):
@@ -76,3 +77,6 @@ class ResearchState(TypedDict, total=False):
     node_timeout_seconds: float
     budget_exhausted: bool
     termination_reason: str
+    parent_thread_id: str
+    parent_checkpoint_id: str
+    manual_evidence: list[str]

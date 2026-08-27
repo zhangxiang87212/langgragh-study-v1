@@ -1,6 +1,7 @@
 """Command-line entry point for the Mini Research Agent."""
 
 import argparse
+from pathlib import Path
 import sys
 from typing import Any
 
@@ -14,10 +15,21 @@ from app.checkpoints import (
 )
 from app.config import ConfigurationError
 from app.graph import build_graph
+from app.inspection import (
+    InspectionError,
+    build_inspection_document,
+    load_inspection_snapshot,
+    save_inspection_document,
+)
 from app.output import save_result
 from app.resilience import ResilienceConfigurationError, summarize_usage
 from app.runtime import create_initial_state, create_run_config, create_thread_id
 from app.streaming import run_graph_stream
+from app.time_travel import (
+    BranchCorrections,
+    TimeTravelError,
+    create_corrected_branch,
+)
 
 
 DEFAULT_TOPIC = "AI Agent 在教育领域的发展趋势"
@@ -48,6 +60,44 @@ def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     history_parser = commands.add_parser("history", help="查看任务快照历史")
     history_parser.add_argument("--thread-id", required=True)
 
+    inspect_parser = commands.add_parser("inspect", help="审查 Checkpoint 资料来源")
+    inspect_parser.add_argument("--thread-id", required=True)
+    inspect_parser.add_argument(
+        "--checkpoint-id",
+        help="历史 Checkpoint ID，默认检查最新快照",
+    )
+    inspect_parser.add_argument(
+        "--output",
+        help="将审查结果写入 Markdown 文件，而不是打印到控制台",
+    )
+
+    fork_parser = commands.add_parser("fork", help="从历史 Checkpoint 创建修正分支")
+    fork_parser.add_argument("--thread-id", required=True, help="原线程 ID")
+    fork_parser.add_argument("--checkpoint-id", required=True)
+    fork_parser.add_argument("--new-thread-id", help="新分支线程 ID，默认自动生成")
+    fork_parser.add_argument(
+        "--plan",
+        help="替换研究计划，多个任务使用分号分隔",
+    )
+    fork_parser.add_argument(
+        "--remove-source",
+        action="append",
+        default=[],
+        help="删除错误来源；可重复传入",
+    )
+    fork_parser.add_argument(
+        "--remove-text",
+        action="append",
+        default=[],
+        help="从研究资料中删除指定文字；可重复传入",
+    )
+    fork_parser.add_argument(
+        "--evidence",
+        action="append",
+        default=[],
+        help="补充人工证据；可重复传入",
+    )
+
     return parser.parse_args(arguments)
 
 
@@ -70,6 +120,12 @@ def main() -> None:
     except OpenAIError as error:
         print(f"OpenAI API 调用失败：{error}", file=sys.stderr)
         raise SystemExit(1) from error
+    except TimeTravelError as error:
+        print(f"时间旅行失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from error
+    except InspectionError as error:
+        print(f"资料审查失败：{error}", file=sys.stderr)
+        raise SystemExit(1) from error
 
 
 def execute_command(graph, arguments: argparse.Namespace) -> None:
@@ -88,6 +144,24 @@ def execute_command(graph, arguments: argparse.Namespace) -> None:
         show_status(graph, arguments.thread_id)
     elif arguments.command == "history":
         show_history(graph, arguments.thread_id)
+    elif arguments.command == "inspect":
+        inspect_research(
+            graph,
+            thread_id=arguments.thread_id,
+            checkpoint_id=arguments.checkpoint_id,
+            output=arguments.output,
+        )
+    elif arguments.command == "fork":
+        fork_research(
+            graph,
+            source_thread_id=arguments.thread_id,
+            checkpoint_id=arguments.checkpoint_id,
+            supplied_thread_id=arguments.new_thread_id,
+            revised_plan=arguments.plan,
+            remove_sources=arguments.remove_source,
+            remove_texts=arguments.remove_text,
+            evidence=arguments.evidence,
+        )
 
 
 def run_new_research(graph, topic: str, supplied_thread_id: str | None) -> None:
@@ -193,10 +267,74 @@ def show_history(graph, thread_id: str) -> None:
     for index, snapshot in enumerate(reversed(snapshots), start=1):
         checkpoint_id = snapshot.config["configurable"]["checkpoint_id"]
         step = snapshot.metadata.get("step", "未知")
+        next_nodes = ", ".join(snapshot.next) or "END"
         print(
-            f"{index}. step={step} | {describe_snapshot(snapshot)} | "
+            f"{index}. step={step} | next={next_nodes} | "
+            f"{describe_snapshot(snapshot)} | "
             f"checkpoint_id={checkpoint_id}"
         )
+
+
+def inspect_research(
+    graph,
+    *,
+    thread_id: str,
+    checkpoint_id: str | None,
+    output: str | None,
+) -> None:
+    """Review one persisted State without invoking any graph node or LLM."""
+
+    snapshot = load_inspection_snapshot(
+        graph,
+        thread_id=create_thread_id(thread_id),
+        checkpoint_id=checkpoint_id,
+    )
+    document = build_inspection_document(snapshot, thread_id=thread_id)
+    if output is None:
+        print(document, end="")
+        return
+
+    output_path = save_inspection_document(document, Path(output))
+    print(f"资料审查完成，结果已写入：{output_path}")
+
+
+def fork_research(
+    graph,
+    *,
+    source_thread_id: str,
+    checkpoint_id: str,
+    supplied_thread_id: str | None,
+    revised_plan: str | None,
+    remove_sources: list[str],
+    remove_texts: list[str],
+    evidence: list[str],
+) -> None:
+    """Create and immediately execute an independent corrected branch."""
+
+    new_thread_id = create_thread_id(supplied_thread_id)
+    revised_tasks = split_plan(revised_plan) if revised_plan is not None else []
+    if revised_plan is not None and not revised_tasks:
+        raise TimeTravelError("修改后的研究计划不能为空。")
+    corrections = BranchCorrections(
+        plan=tuple(revised_tasks),
+        remove_sources=tuple(remove_sources),
+        remove_texts=tuple(remove_texts),
+        evidence=tuple(evidence),
+    )
+    branch = create_corrected_branch(
+        graph,
+        source_thread_id=create_thread_id(source_thread_id),
+        checkpoint_id=checkpoint_id,
+        new_thread_id=new_thread_id,
+        corrections=corrections,
+    )
+
+    print(f"原线程 ID：{source_thread_id}")
+    print(f"分支线程 ID：{branch.thread_id}")
+    print(f"来源 Checkpoint：{checkpoint_id}")
+    print(f"从节点 {branch.next_node} 继续执行。")
+    result = run_graph_stream(graph, None, branch.config)
+    finish_or_report_interrupt(result, branch.thread_id)
 
 
 def require_existing_thread(snapshot, thread_id: str) -> None:

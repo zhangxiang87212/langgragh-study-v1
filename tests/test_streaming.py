@@ -12,11 +12,27 @@ from langgraph.types import Command
 
 from app.graph import build_graph
 from app.runtime import create_initial_state, create_run_config
-from app.streaming import STREAM_MODES, run_graph_stream
+from app.streaming import STREAM_MODES, render_state_updates, run_graph_stream
 from tests.fakes import FakeResearchLLM
 
 
 class StreamingTests(unittest.TestCase):
+    def test_internal_checkpoint_metadata_is_not_logged_as_a_node(self) -> None:
+        console_output = StringIO()
+
+        with redirect_stdout(console_output):
+            render_state_updates(
+                {
+                    "__metadata__": {"cached": True},
+                    "research_worker": {"research_results": []},
+                },
+                None,
+            )
+
+        output = console_output.getvalue()
+        self.assertNotIn("__metadata__", output)
+        self.assertIn("节点完成：research_worker", output)
+
     def test_stream_runner_collects_state_and_prints_events(self) -> None:
         graph = Mock()
         graph.stream.return_value = iter(
