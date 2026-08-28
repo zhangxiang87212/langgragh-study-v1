@@ -1,0 +1,238 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+  
+  h1, h2, h3, h4, h5, h6, .font-heading {
+    font-family: 'Outfit', 'Inter', sans-serif;
+  }
+  
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Custom modern scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.25);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.45);
+}
+
+/* Glassmorphism utilities with Light/Dark support */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+}
+.dark .glass-panel {
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-panel-glow {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  box-shadow: 0 0 25px -5px rgba(99, 102, 241, 0.1);
+}
+.dark .glass-panel-glow {
+  background: rgba(17, 24, 39, 0.85);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  box-shadow: 0 0 25px -5px rgba(99, 102, 241, 0.15);
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.04);
+}
+.dark .glass-card {
+  background: rgba(30, 41, 59, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: none;
+}
+
+/* Ant Design Dark Customizations */
+.dark .ant-modal-content {
+  background-color: #0f172a !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .ant-drawer-content {
+  background-color: #0b0f19 !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .ant-modal-header, .dark .ant-drawer-header {
+  background-color: transparent !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .ant-modal-title, .dark .ant-drawer-title {
+  color: #f8fafc !important;
+}
+
+/* Markdown styling in reports */
+.markdown-body {
+  color: #334155;
+  line-height: 1.75;
+}
+.dark .markdown-body {
+  color: #e2e8f0;
+}
+
+.markdown-body h1 {
+  font-size: 1.875rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin-top: 1.5rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+.dark .markdown-body h1 {
+  color: #f8fafc;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.markdown-body h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #4f46e5;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+.dark .markdown-body h2 {
+  color: #818cf8;
+}
+
+.markdown-body h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #1e293b;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+}
+.dark .markdown-body h3 {
+  color: #cbd5e1;
+}
+
+.markdown-body p {
+  margin-bottom: 1rem;
+}
+
+.markdown-body ul, .markdown-body ol {
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.markdown-body ul {
+  list-style-type: disc;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+}
+
+.markdown-body li {
+  margin-bottom: 0.35rem;
+}
+
+.markdown-body blockquote {
+  border-left: 4px solid #6366f1;
+  padding-left: 1rem;
+  color: #64748b;
+  background: rgba(99, 102, 241, 0.06);
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+  border-radius: 0 6px 6px 0;
+}
+.dark .markdown-body blockquote {
+  color: #94a3b8;
+  background: rgba(99, 102, 241, 0.05);
+}
+
+.markdown-body code {
+  background: rgba(241, 245, 249, 1);
+  color: #0284c7;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.875em;
+}
+.dark .markdown-body code {
+  background: rgba(30, 41, 59, 0.8);
+  color: #38bdf8;
+}
+
+.markdown-body pre {
+  background: #f8fafc;
+  border: 1px solid rgba(226, 232, 240, 1);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin-bottom: 1.25rem;
+}
+.dark .markdown-body pre {
+  background: #090d16;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+  color: #0f172a;
+}
+.dark .markdown-body pre code {
+  color: #f1f5f9;
+}
+
+.markdown-body a {
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.dark .markdown-body a {
+  color: #60a5fa;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.5rem;
+}
+
+.markdown-body th, .markdown-body td {
+  border: 1px solid rgba(226, 232, 240, 1);
+  padding: 0.75rem;
+  text-align: left;
+}
+.dark .markdown-body th, .dark .markdown-body td {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.markdown-body th {
+  background: rgba(241, 245, 249, 0.8);
+  color: #0f172a;
+}
+.dark .markdown-body th {
+  background: rgba(30, 41, 59, 0.6);
+  color: #f8fafc;
+}

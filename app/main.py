@@ -98,6 +98,12 @@ def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
         help="补充人工证据；可重复传入",
     )
 
+    web_parser = commands.add_parser("web", help="启动 Web 前端服务与 API")
+    web_parser.add_argument("--host", default="0.0.0.0", help="监听地址")
+    web_parser.add_argument("--port", type=int, default=8000, help="监听端口")
+    web_parser.add_argument("--no-reload", dest="reload", action="store_false", help="禁用代码热重载")
+    web_parser.set_defaults(reload=True)
+
     return parser.parse_args(arguments)
 
 
@@ -105,6 +111,12 @@ def main() -> None:
     """Open the configured checkpointer and execute one CLI command."""
 
     arguments = parse_arguments()
+    if arguments.command == "web":
+        import uvicorn
+        print(f"🚀 正在启动 Mini Research Agent Web 服务：http://{arguments.host}:{arguments.port}")
+        uvicorn.run("app.server:app", host=arguments.host, port=arguments.port, reload=arguments.reload)
+        return
+
     try:
         checkpoint_settings = CheckpointSettings.from_env()
         with open_checkpointer(checkpoint_settings) as checkpointer:
