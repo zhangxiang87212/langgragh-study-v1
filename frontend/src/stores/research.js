@@ -58,6 +58,7 @@ export const useResearchStore = defineStore('research', {
     showApprovalModal: false,
     showTimeTravelDrawer: false,
     showNewResearchModal: false,
+    showModelSettingsModal: false,
     
     // Live logs stream
     liveLogs: [],
@@ -68,6 +69,7 @@ export const useResearchStore = defineStore('research', {
 
   getters: {
     hasActiveThread: (state) => !!state.currentThreadId,
+    isLLMConfigured: (state) => !!state.config?.configured,
     isWaitingApproval: (state) => state.executionStatus === 'waiting_approval',
     isFinished: (state) => state.executionStatus === 'completed',
     formattedCost: (state) => {
@@ -84,8 +86,39 @@ export const useResearchStore = defineStore('research', {
     async fetchConfig() {
       try {
         this.config = await api.getConfig()
+        if (!this.config.configured) {
+          this.showModelSettingsModal = true
+        }
       } catch (err) {
         console.error('Failed to load system config:', err)
+        this.config = { configured: false }
+        this.showModelSettingsModal = true
+      }
+    },
+
+    async saveModelConfig(payload) {
+      try {
+        const savedConfig = await api.saveConfig(payload)
+        this.config = { ...this.config, ...savedConfig }
+        this.showModelSettingsModal = false
+        message.success('模型配置已保存到当前服务端会话')
+        return true
+      } catch (err) {
+        const detail = err.response?.data?.detail || err.message
+        message.error(`保存模型配置失败：${detail}`)
+        return false
+      }
+    },
+
+    async clearModelConfig() {
+      try {
+        await api.clearConfig()
+        this.config = { ...this.config, configured: false, api_key_configured: false }
+        this.showModelSettingsModal = true
+        message.success('当前会话中的 API Key 已清除')
+      } catch (err) {
+        const detail = err.response?.data?.detail || err.message
+        message.error(`清除模型配置失败：${detail}`)
       }
     },
 
@@ -163,6 +196,12 @@ export const useResearchStore = defineStore('research', {
     },
 
     startNewResearch(topic) {
+      if (!this.isLLMConfigured) {
+        this.showNewResearchModal = false
+        this.showModelSettingsModal = true
+        message.warning('请先配置模型和 API Key')
+        return
+      }
       this.closeStream()
       this.topic = topic
       this.draft = ''

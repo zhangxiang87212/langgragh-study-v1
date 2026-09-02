@@ -1,16 +1,15 @@
 """FastAPI router and SSE endpoints for Mini Research Agent."""
 
 import asyncio
-from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 import sqlite3
 from typing import Any, AsyncIterator, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from langgraph.types import Command
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from sse_starlette.sse import EventSourceResponse
 
 from app.checkpoints import (
@@ -18,13 +17,22 @@ from app.checkpoints import (
     CheckpointSettings,
     open_checkpointer,
 )
-from app.config import ConfigurationError, Settings
+from app.config import (
+    ConfigurationError,
+    DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_LLM_PROVIDER,
+    DEFAULT_OPENAI_MODEL,
+    DEFAULT_OPENAI_SEARCH_MODEL,
+    Settings,
+)
 from app.graph import build_graph
 from app.inspection import (
     InspectionError,
     build_inspection_document,
     load_inspection_snapshot,
 )
+from app.llm import use_research_service
 from app.resilience import (
     ResilienceConfigurationError,
     ResilienceSettings,
@@ -37,6 +45,11 @@ from app.time_travel import (
     TimeTravelError,
     create_corrected_branch,
     find_checkpoint,
+)
+from app.web_llm_config import (
+    LLM_SESSION_COOKIE,
+    SESSION_TTL_SECONDS,
+    web_llm_settings,
 )
 
 router = APIRouter(prefix="/api")
@@ -92,32 +105,153 @@ class ForkRequest(BaseModel):
     manual_evidence: Optional[List[str]] = Field(default=None, description="补充的人工证据")
 
 
+class LLMConfigRequest(BaseModel):
+    """Browser-supplied credentials that are never persisted or returned."""
+
+    provider: str = Field(default=DEFAULT_LLM_PROVIDER)
+    api_key: SecretStr
+    openai_model: str = Field(default=DEFAULT_OPENAI_MODEL)
+    openai_search_model: str = Field(default=DEFAULT_OPENAI_SEARCH_MODEL)
+    deepseek_model: str = Field(default=DEFAULT_DEEPSEEK_MODEL)
+    deepseek_base_url: str = Field(default=DEFAULT_DEEPSEEK_BASE_URL)
+
+
 # ---------------- API Endpoints ---------------- #
 
 @router.get("/config")
-def get_system_config():
-    """Return runtime configuration and LLM settings."""
+def get_system_config(request: Request):
+    """Return public runtime settings without ever returning an API key."""
+
+    settings = _get_web_llm_settings(request)
+    res_settings = ResilienceSettings.from_env()
+    cp_settings = CheckpointSettings.from_env()
+    provider = settings.llm_provider if settings else DEFAULT_LLM_PROVIDER
+    model = _selected_model(settings) if settings else DEFAULT_OPENAI_MODEL
+    return {
+        "configured": settings is not None,
+        "provider": provider,
+        "model": model,
+        "openai_model": (
+            settings.openai_model if settings else DEFAULT_OPENAI_MODEL
+        ),
+        "openai_search_model": (
+            settings.openai_search_model
+            if settings
+            else DEFAULT_OPENAI_SEARCH_MODEL
+        ),
+        "deepseek_model": (
+            settings.deepseek_model if settings else DEFAULT_DEEPSEEK_MODEL
+        ),
+        "deepseek_base_url": (
+            settings.deepseek_base_url
+            if settings
+            else DEFAULT_DEEPSEEK_BASE_URL
+        ),
+        "api_key_configured": settings is not None,
+        "credential_storage": "server_memory",
+        "search_max_rounds": res_settings.max_search_rounds,
+        "llm_max_calls": res_settings.max_llm_calls,
+        "max_total_tokens": res_settings.max_total_tokens,
+        "max_cost_usd": res_settings.max_cost_usd,
+        "node_timeout_seconds": res_settings.node_timeout_seconds,
+        "checkpoint_backend": cp_settings.backend,
+        "checkpoint_db_path": str(cp_settings.database_path),
+    }
+
+
+@router.put("/config")
+def save_system_config(
+    payload: LLMConfigRequest,
+    request: Request,
+    response: Response,
+):
+    """Validate and retain one browser session's LLM settings in memory."""
+
     try:
-        settings = Settings.from_env()
-        res_settings = ResilienceSettings.from_env()
-        cp_settings = CheckpointSettings.from_env()
-        model_name = settings.openai_model if settings.llm_provider == "openai" else settings.deepseek_model
-        return {
-            "provider": settings.llm_provider,
-            "model": model_name,
-            "search_max_rounds": res_settings.max_search_rounds,
-            "llm_max_calls": res_settings.max_llm_calls,
-            "max_total_tokens": res_settings.max_total_tokens,
-            "max_cost_usd": res_settings.max_cost_usd,
-            "node_timeout_seconds": res_settings.node_timeout_seconds,
-            "checkpoint_backend": cp_settings.backend,
-            "checkpoint_db_path": str(cp_settings.database_path),
-        }
-    except Exception as e:
-        return {
-            "error": str(e),
-            "checkpoint_backend": "sqlite",
-        }
+        settings = Settings.from_values(
+            llm_provider=payload.provider,
+            api_key=payload.api_key.get_secret_value(),
+            openai_model=payload.openai_model,
+            openai_search_model=payload.openai_search_model,
+            deepseek_model=payload.deepseek_model,
+            deepseek_base_url=payload.deepseek_base_url,
+        )
+    except ConfigurationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    previous_session_id = request.cookies.get(LLM_SESSION_COOKIE)
+    session_id = web_llm_settings.save(settings, previous_session_id)
+    response.set_cookie(
+        key=LLM_SESSION_COOKIE,
+        value=session_id,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=_use_secure_cookie(request),
+        samesite="strict",
+        path="/api",
+    )
+    return {
+        "configured": True,
+        "provider": settings.llm_provider,
+        "model": _selected_model(settings),
+        "openai_model": settings.openai_model,
+        "openai_search_model": settings.openai_search_model,
+        "deepseek_model": settings.deepseek_model,
+        "deepseek_base_url": settings.deepseek_base_url,
+        "api_key_configured": True,
+        "credential_storage": "server_memory",
+    }
+
+
+@router.delete("/config")
+def clear_system_config(request: Request, response: Response):
+    """Remove one browser session's in-memory API credentials."""
+
+    session_id = request.cookies.get(LLM_SESSION_COOKIE)
+    web_llm_settings.delete(session_id)
+    response.delete_cookie(
+        key=LLM_SESSION_COOKIE,
+        path="/api",
+        httponly=True,
+        samesite="strict",
+    )
+    return {"configured": False}
+
+
+def _get_web_llm_settings(request: Request) -> Settings | None:
+    """Resolve credentials by opaque HttpOnly session cookie."""
+
+    session_id = request.cookies.get(LLM_SESSION_COOKIE)
+    return web_llm_settings.get(session_id)
+
+
+def _require_web_llm_settings(request: Request) -> Settings:
+    """Stop paid execution until the current browser has configured a model."""
+
+    settings = _get_web_llm_settings(request)
+    if settings is None:
+        raise HTTPException(
+            status_code=428,
+            detail="请先在页面的模型设置中配置 Provider 和 API Key。",
+        )
+    return settings
+
+
+def _selected_model(settings: Settings) -> str:
+    """Return the primary model shown in the navigation bar."""
+
+    if settings.llm_provider == "openai":
+        return settings.openai_model
+    return settings.deepseek_model
+
+
+def _use_secure_cookie(request: Request) -> bool:
+    """Allow deployments behind a TLS proxy to require a Secure cookie."""
+
+    configured = os.getenv("LLM_SESSION_COOKIE_SECURE", "").strip().lower()
+    if configured:
+        return configured in {"1", "true", "yes", "on"}
+    return request.url.scheme == "https"
 
 
 @router.get("/research/threads")
@@ -390,12 +524,14 @@ def safe_json_dumps(obj: Any) -> str:
 @router.get("/research/{thread_id}/stream")
 async def stream_research(
     thread_id: str,
+    request: Request,
     action: str = Query("run", description="Action: run, resume, or replay"),
     topic: Optional[str] = Query(None, description="Topic when action is run"),
     approve: bool = Query(True, description="Approve plan when action is resume"),
     plan: Optional[str] = Query(None, description="Semicolon-separated revised plan tasks"),
 ):
     """SSE endpoint delivering real-time execution events."""
+    llm_settings = _require_web_llm_settings(request)
     graph = get_graph()
     config = create_run_config(thread_id)
 
@@ -429,33 +565,33 @@ async def stream_research(
                     {"event": "status", "data": {"status": "started", "thread_id": thread_id}}
                 )
 
-                for part in graph.stream(
-                    graph_input,
-                    config=config,
-                    stream_mode=STREAM_MODES,
-                    version="v2",
-                ):
-                    part_type = part.get("type")
-                    data = part.get("data")
-                    
-                    if part_type == "custom":
-                        loop.call_soon_threadsafe(
-                            queue.put_nowait,
-                            {"event": "custom", "data": data}
-                        )
-                    elif part_type == "updates":
-                        # Filter out internal keys like __interrupt__ or __metadata__
-                        clean_updates = {}
-                        if isinstance(data, dict):
-                            for node_name, node_val in data.items():
-                                if node_name.startswith("__"):
-                                    continue
-                                clean_updates[node_name] = node_val
-                        if clean_updates:
+                with use_research_service(llm_settings):
+                    for part in graph.stream(
+                        graph_input,
+                        config=config,
+                        stream_mode=STREAM_MODES,
+                        version="v2",
+                    ):
+                        part_type = part.get("type")
+                        data = part.get("data")
+
+                        if part_type == "custom":
                             loop.call_soon_threadsafe(
                                 queue.put_nowait,
-                                {"event": "updates", "data": clean_updates}
+                                {"event": "custom", "data": data}
                             )
+                        elif part_type == "updates":
+                            clean_updates = {}
+                            if isinstance(data, dict):
+                                for node_name, node_val in data.items():
+                                    if node_name.startswith("__"):
+                                        continue
+                                    clean_updates[node_name] = node_val
+                            if clean_updates:
+                                loop.call_soon_threadsafe(
+                                    queue.put_nowait,
+                                    {"event": "updates", "data": clean_updates}
+                                )
 
                 snapshot = graph.get_state(config)
                 values = dict(snapshot.values or {})

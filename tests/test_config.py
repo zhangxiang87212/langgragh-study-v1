@@ -81,6 +81,27 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigurationError, "LLM_PROVIDER"):
                 Settings.from_env()
 
+    def test_page_values_create_openai_settings_without_environment(self) -> None:
+        settings = Settings.from_values(
+            llm_provider=" OpenAI ",
+            api_key=" page-secret ",
+            openai_model="gpt-page",
+            openai_search_model="gpt-search-page",
+        )
+
+        self.assertEqual(settings.llm_provider, "openai")
+        self.assertEqual(settings.openai_api_key, "page-secret")
+        self.assertEqual(settings.openai_model, "gpt-page")
+        self.assertIsNone(settings.deepseek_api_key)
+        self.assertNotIn("page-secret", repr(settings))
+
+    def test_page_values_reject_an_empty_api_key(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "API Key"):
+            Settings.from_values(
+                llm_provider="deepseek",
+                api_key="   ",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,10 @@
 """LLM provider adapters used by the LangGraph nodes."""
 
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
 import re
+from threading import Lock
 from typing import Callable, TypeVar
 
 from openai import OpenAI
@@ -603,15 +606,46 @@ def create_research_service(settings: Settings):
 
 
 class ConfiguredResearchService:
-    """Load environment settings only when the graph first calls the LLM."""
+    """Resolve a request-scoped web service or the CLI environment service."""
 
     def __init__(self) -> None:
-        self._service = None
+        self._environment_service = None
+        self._environment_lock = Lock()
 
     def __getattr__(self, method_name: str):
-        if self._service is None:
-            self._service = create_research_service(Settings.from_env())
-        return getattr(self._service, method_name)
+        service = _request_research_service.get()
+        if service is None:
+            service = self._get_environment_service()
+        return getattr(service, method_name)
+
+    def _get_environment_service(self):
+        """Create the .env-backed service once for CLI compatibility."""
+
+        if self._environment_service is not None:
+            return self._environment_service
+        with self._environment_lock:
+            if self._environment_service is None:
+                settings = Settings.from_env()
+                self._environment_service = create_research_service(settings)
+        return self._environment_service
+
+
+_request_research_service: ContextVar[object | None] = ContextVar(
+    "request_research_service",
+    default=None,
+)
+
+
+@contextmanager
+def use_research_service(settings: Settings):
+    """Use one browser session's provider for the current graph execution."""
+
+    service = create_research_service(settings)
+    token = _request_research_service.set(service)
+    try:
+        yield
+    finally:
+        _request_research_service.reset(token)
 
 
 llm = ConfiguredResearchService()

@@ -130,6 +130,7 @@
       <PlanApprovalModal />
       <TimeTravelDrawer />
       <NewResearchModal />
+      <ModelSettingsModal />
     </div>
   </a-config-provider>
 </template>
@@ -155,6 +156,7 @@ import ReportViewer from './components/ReportViewer.vue'
 import UsageStatsCard from './components/UsageStatsCard.vue'
 import TimeTravelDrawer from './components/TimeTravelDrawer.vue'
 import NewResearchModal from './components/NewResearchModal.vue'
+import ModelSettingsModal from './components/ModelSettingsModal.vue'
 
 const store = useResearchStore()
 const themeStore = useThemeStore()

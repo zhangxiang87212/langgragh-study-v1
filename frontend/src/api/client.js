@@ -3,6 +3,7 @@ import axios from 'axios'
 const apiClient = axios.create({
   baseURL: '/api',
   timeout: 30000,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -11,6 +12,8 @@ const apiClient = axios.create({
 export const api = {
   // Config
   getConfig: () => apiClient.get('/config').then(res => res.data),
+  saveConfig: (payload) => apiClient.put('/config', payload).then(res => res.data),
+  clearConfig: () => apiClient.delete('/config').then(res => res.data),
 
   // Threads
   getThreads: () => apiClient.get('/research/threads').then(res => res.data),

@@ -21,20 +21,37 @@
     </div>
 
     <!-- Center: Runtime Model Badge -->
-    <div v-if="store.config" class="hidden md:flex items-center space-x-2 bg-slate-100/90 dark:bg-slate-900/90 px-3.5 py-1.5 rounded-full border border-slate-200 dark:border-slate-800 text-xs transition-colors">
+    <button
+      v-if="store.config"
+      @click="store.showModelSettingsModal = true"
+      class="hidden md:flex items-center space-x-2 bg-slate-100/90 hover:bg-slate-200/90 dark:bg-slate-900/90 dark:hover:bg-slate-800/90 px-3.5 py-1.5 rounded-full border border-slate-200 dark:border-slate-800 text-xs transition-colors cursor-pointer"
+      title="打开模型设置"
+    >
       <span class="flex h-2 w-2 relative">
-        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-        <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+        <span v-if="store.isLLMConfigured" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+        <span :class="['relative inline-flex rounded-full h-2 w-2', store.isLLMConfigured ? 'bg-emerald-500' : 'bg-amber-500']"></span>
       </span>
-      <span class="text-slate-500 dark:text-slate-400">引擎:</span>
-      <span class="font-medium text-slate-800 dark:text-slate-200 uppercase">{{ store.config.provider }}</span>
-      <span class="text-slate-300 dark:text-slate-600">|</span>
-      <span class="text-slate-500 dark:text-slate-400">模型:</span>
-      <span class="font-mono text-indigo-600 dark:text-indigo-300">{{ store.config.model }}</span>
-    </div>
+      <template v-if="store.isLLMConfigured">
+        <span class="text-slate-500 dark:text-slate-400">引擎:</span>
+        <span class="font-medium text-slate-800 dark:text-slate-200 uppercase">{{ store.config.provider }}</span>
+        <span class="text-slate-300 dark:text-slate-600">|</span>
+        <span class="font-mono text-indigo-600 dark:text-indigo-300">{{ store.config.model }}</span>
+      </template>
+      <template v-else>
+        <span class="font-medium text-amber-700 dark:text-amber-300">模型尚未配置</span>
+      </template>
+      <Settings2 class="w-3.5 h-3.5 text-slate-400" />
+    </button>
 
     <!-- Right: Theme Switcher & Actions -->
-    <div class="flex items-center space-x-3">
+      <div class="flex items-center space-x-3">
+      <button
+        @click="store.showModelSettingsModal = true"
+        class="md:hidden p-2 rounded-lg bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-300 border border-slate-200 dark:border-slate-800 cursor-pointer"
+        title="模型设置"
+      >
+        <Settings2 class="w-4 h-4" />
+      </button>
       <!-- Theme Switcher Segmented Control -->
       <div class="flex items-center p-1 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 transition-colors">
         <button
@@ -103,7 +120,7 @@
 </template>
 
 <script setup>
-import { Sparkles, History, PlusCircle, Sun, Moon, Laptop } from 'lucide-vue-next'
+import { Sparkles, History, PlusCircle, Sun, Moon, Laptop, Settings2 } from 'lucide-vue-next'
 import { useResearchStore } from '../stores/research'
 import { useThemeStore } from '../stores/theme'
 

@@ -26,10 +26,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable CORS for frontend development
+# Only allow known development origins when the frontend is served separately.
+default_origins = "http://localhost:5173,http://127.0.0.1:5173"
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", default_origins).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,4 +61,4 @@ if frontend_dist.exists() and (frontend_dist / "index.html").exists():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.server:app", host="0.0.0.0", port=8011, reload=True)
